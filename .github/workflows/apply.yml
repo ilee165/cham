@@ -1,0 +1,37 @@
+name: terraform-apply
+on:
+  push:
+    branches: [main]
+    paths: ["terraform/**"]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    environment: lab   # environment protection rule = manual approval gate
+    defaults:
+      run:
+        working-directory: terraform/envs/lab
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Apply
+        env:
+          ARM_USE_OIDC: "true"
+          TF_VAR_home_ip: ${{ secrets.HOME_IP }}
+          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+          TF_VAR_wg_peer_public_key: ${{ secrets.WG_PEER_PUBLIC_KEY }}
+          TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
+          TF_VAR_budget_start_date: ${{ vars.BUDGET_START_DATE }}
+        run: |
+          terraform init
+          terraform apply -auto-approve

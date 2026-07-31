@@ -1,0 +1,27 @@
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+
+# Secrets & local config — NEVER commit
+terraform.tfvars
+*.auto.tfvars
+.env
+*.pem
+*.key
+wg0.conf
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+*.egg-info/
+
+# OS
+.DS_Store
