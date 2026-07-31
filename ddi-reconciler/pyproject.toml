@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ddi-reconciler"
+version = "0.1.0"
+description = "Reconciler v2 — converges Azure Private DNS and Cloudflare toward SpatiumDDI truth"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+aletheia-reconcile = "ddi_reconciler.cli:main"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ddi_reconciler"]
