@@ -9,7 +9,7 @@
 ## Session end — ALWAYS
 1. Confirm `enable_private_resolver = false` (grep tfvars)
 2. `terraform -chdir=terraform/envs/lab destroy` OR run destroy.yml
-3. `az resource list -g rg-aletheia-lab -o table` → must be empty
+3. `az resource list -g rg-cham-lab -o table` → must be empty
    (public IPs and disks survive VM deletion)
 4. `az consumption budget list` sanity check if unsure
 

@@ -40,5 +40,5 @@ jobs:
           terraform destroy -auto-approve
       - name: Leftover check
         run: |
-          echo "Manually verify rg-aletheia-lab is empty — PIPs and disks can outlive VMs:"
-          az resource list --resource-group rg-aletheia-lab -o table || true
+          echo "Manually verify rg-cham-lab is empty — PIPs and disks can outlive VMs:"
+          az resource list --resource-group rg-cham-lab -o table || true

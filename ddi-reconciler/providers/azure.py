@@ -1,5 +1,5 @@
 """
-Azure provider for aletheia-reconcile.
+Azure provider for cham-reconcile.
 
 Usage:
     Uses azure-mgmt-privatedns with DefaultAzureCredential (az login locally)

@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]
-aletheia-reconcile = "ddi_reconciler.cli:main"
+cham-reconcile = "ddi_reconciler.cli:main"
 
 [dependency-groups]
 dev = ["pytest"]

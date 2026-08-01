@@ -1,11 +1,11 @@
-# Aletheia
+# cham
 
 Hybrid DDI lab: one source of truth for DNS across three planes — an
 on-prem SpatiumDDI stack (BIND9 + Kea under a control plane), Azure
 hub-and-spoke with Private DNS, and Cloudflare public DNS — all managed
 from this repo with Terraform and converged by a Python reconciler.
 
-Named for Aletheia, the two-faced god: the core demo is **split-horizon
+Named for cham or 참 meaning geniune in Korean Hanja: the core demo is **split-horizon
 resolution** — `www.dwsolution.co` answers differently inside and outside
 the lab, both answers managed here.
 

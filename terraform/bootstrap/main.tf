@@ -26,12 +26,12 @@ resource "random_string" "suffix" {
 }
 
 resource "azurerm_resource_group" "state" {
-  name     = "rg-aletheia-tfstate"
+  name     = "rg-cham-tfstate"
   location = "eastus"
 }
 
 resource "azurerm_storage_account" "state" {
-  name                            = "staletheiatf${random_string.suffix.result}"
+  name                            = "stchamtf${random_string.suffix.result}"
   resource_group_name             = azurerm_resource_group.state.name
   location                        = azurerm_resource_group.state.location
   account_tier                    = "Standard"

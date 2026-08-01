@@ -11,7 +11,7 @@ terraform {
     }
   }
   backend "azurerm" {
-    resource_group_name  = "rg-aletheia-tfstate"
+    resource_group_name  = "rg-cham-tfstate"
     storage_account_name = "REPLACE_FROM_BOOTSTRAP_OUTPUT"
     container_name       = "tfstate"
     key                  = "cloudflare.tfstate"

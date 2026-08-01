@@ -10,7 +10,7 @@ terraform {
 
   backend "azurerm" {
     # Values from bootstrap output. Blob lease provides state locking natively.
-    resource_group_name  = "rg-aletheia-tfstate"
+    resource_group_name  = "rg-cham-tfstate"
     storage_account_name = "REPLACE_FROM_BOOTSTRAP_OUTPUT"
     container_name       = "tfstate"
     key                  = "lab.tfstate"

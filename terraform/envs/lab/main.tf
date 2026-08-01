@@ -1,13 +1,13 @@
 locals {
   tags = {
-    project = "aletheia-lab"
+    project = "cham-lab"
     managed = "terraform"
     env     = "lab"
   }
 }
 
 resource "azurerm_resource_group" "lab" {
-  name     = "rg-aletheia-lab"
+  name     = "rg-cham-lab"
   location = var.location
   tags     = local.tags
 }
@@ -88,7 +88,7 @@ module "dns_resolver" {
 # Budget alert — notification only. Azure has NO automatic spend cap.
 # The real kill switch is .github/workflows/destroy.yml.
 resource "azurerm_consumption_budget_subscription" "lab" {
-  name            = "budget-aletheia-lab"
+  name            = "budget-cham-lab"
   subscription_id = "/subscriptions/${var.subscription_id}"
   amount          = 50
   time_grain      = "Monthly"
