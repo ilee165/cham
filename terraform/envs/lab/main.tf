@@ -20,6 +20,7 @@ module "hub" {
   ssh_public_key      = var.ssh_public_key
   lab_zone            = var.lab_zone
   onprem_dns_ip       = var.onprem_dns_ip
+  wg_transfer_cidr    = var.wg_transfer_cidr
   wg_peer_public_key  = var.wg_peer_public_key
   tags                = local.tags
 }
@@ -38,6 +39,9 @@ module "spoke_app" {
   hub_address_space    = module.hub.vnet_address_space
   hub_nva_ip           = module.hub.vm_private_ip
   onprem_address_space = var.onprem_address_space
+  wg_transfer_cidr     = var.wg_transfer_cidr
+  enable_test_vm       = var.enable_test_vm
+  ssh_public_key       = var.ssh_public_key
   tags                 = local.tags
 }
 
@@ -54,6 +58,9 @@ module "spoke_mgmt" {
   hub_address_space    = module.hub.vnet_address_space
   hub_nva_ip           = module.hub.vm_private_ip
   onprem_address_space = var.onprem_address_space
+  wg_transfer_cidr     = var.wg_transfer_cidr
+  enable_test_vm       = var.enable_test_vm
+  ssh_public_key       = var.ssh_public_key
   tags                 = local.tags
 }
 
@@ -67,7 +74,7 @@ module "private_dns" {
     mgmt = { vnet_id = module.spoke_mgmt.vnet_id, registration = true }
   }
   a_records = {
-    # Seed records; reconciler owns ongoing convergence
+    # Terraform owns seed records; the reconciler owns a disjoint managed set.
     "db" = "10.10.4.20"
   }
   tags = local.tags

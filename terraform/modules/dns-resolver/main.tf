@@ -7,7 +7,19 @@
 # Subnets must be /28+, delegated to Microsoft.Network/dnsResolvers, and
 # usable for nothing else.
 
+terraform {
+  required_version = ">= 1.9"
+
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
+    }
+  }
+}
+
 resource "azurerm_subnet" "resolver_inbound" {
+  #checkov:skip=CKV2_AZURE_31:owner=repository-maintainer; exact=azurerm_subnet.resolver_inbound; rationale=the dedicated delegated subnet is reserved for the managed DNS Private Resolver endpoint; control=the feature remains hard-disabled throughout Phase 2 and requires a separate cost approval in a later phase.
   count                = var.enabled ? 1 : 0
   name                 = "snet-resolver-in"
   resource_group_name  = var.resource_group_name
@@ -24,6 +36,7 @@ resource "azurerm_subnet" "resolver_inbound" {
 }
 
 resource "azurerm_subnet" "resolver_outbound" {
+  #checkov:skip=CKV2_AZURE_31:owner=repository-maintainer; exact=azurerm_subnet.resolver_outbound; rationale=the dedicated delegated subnet is reserved for the managed DNS Private Resolver endpoint; control=the feature remains hard-disabled throughout Phase 2 and requires a separate cost approval in a later phase.
   count                = var.enabled ? 1 : 0
   name                 = "snet-resolver-out"
   resource_group_name  = var.resource_group_name

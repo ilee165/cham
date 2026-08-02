@@ -5,4 +5,5 @@ ssh_public_key     = "ssh-ed25519 AAAA... you@laptop"
 wg_peer_public_key = "laptop-wireguard-public-key"
 alert_email        = "you@example.com"
 budget_start_date  = "2026-08-01T00:00:00Z"
-# enable_private_resolver = true   # single session only — ~$0.50/endpoint/hour
+enable_private_resolver = false # keep disabled throughout Phase 2
+enable_test_vm          = false # enable only for an approved, timeboxed verification window

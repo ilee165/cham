@@ -29,6 +29,14 @@ variable "hub_vm_ip" {
 variable "home_ip" {
   description = "Your home public IP as /32. NEVER widen. Not committed — set in tfvars (gitignored) or TF_VAR env."
   type        = string
+
+  validation {
+    condition = (
+      can(cidrhost(var.home_ip, 0)) &&
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/32$", var.home_ip))
+    )
+    error_message = "home_ip must be one valid IPv4 host expressed as a /32."
+  }
 }
 
 variable "admin_username" {
@@ -41,6 +49,12 @@ variable "ssh_public_key" { type = string }
 variable "onprem_address_space" {
   type    = string
   default = "10.20.0.0/16"
+}
+
+variable "wg_transfer_cidr" {
+  description = "WireGuard transfer network allowed to query DNS and reach spoke workloads."
+  type        = string
+  default     = "172.16.0.0/24"
 }
 
 variable "lab_zone" {

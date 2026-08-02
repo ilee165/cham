@@ -11,10 +11,12 @@ terraform {
     }
   }
   backend "azurerm" {
-    resource_group_name  = "rg-cham-tfstate"
-    storage_account_name = "REPLACE_FROM_BOOTSTRAP_OUTPUT"
-    container_name       = "tfstate"
-    key                  = "cloudflare.tfstate"
+    # storage_account_name, subscription_id, and tenant_id come from a local
+    # gitignored *.tfbackend file. Credentials remain environment-sourced.
+    resource_group_name = "rg-cham-tfstate"
+    container_name      = "tfstate"
+    key                 = "cloudflare.tfstate"
+    use_azuread_auth    = true
   }
 }
 

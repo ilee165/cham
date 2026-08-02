@@ -2,6 +2,17 @@
 # This VM is the NVA: spokes route through it, and it forwards DNS
 # conditionally to on-prem (lab zone) or Azure-provided DNS (everything else).
 
+terraform {
+  required_version = ">= 1.9"
+
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
+    }
+  }
+}
+
 resource "azurerm_virtual_network" "hub" {
   name                = "vnet-hub"
   location            = var.location
@@ -73,7 +84,7 @@ resource "azurerm_network_security_group" "hub" {
     protocol                   = "*"
     source_port_range          = "*"
     destination_port_ranges    = ["53"]
-    source_address_prefixes    = ["10.10.0.0/16", "10.20.0.0/16"]
+    source_address_prefixes    = ["10.10.0.0/16", var.onprem_address_space, var.wg_transfer_cidr]
     destination_address_prefix = "*"
   }
 
@@ -85,7 +96,7 @@ resource "azurerm_network_security_group" "hub" {
     protocol                   = "*"
     source_port_range          = "*"
     destination_port_range     = "*"
-    source_address_prefix      = "Internet"
+    source_address_prefix      = "*"
     destination_address_prefix = "*"
   }
 }
@@ -95,8 +106,14 @@ resource "azurerm_subnet_network_security_group_association" "vpn" {
   network_security_group_id = azurerm_network_security_group.hub.id
 }
 
+resource "azurerm_subnet_network_security_group_association" "shared" {
+  subnet_id                 = azurerm_subnet.shared.id
+  network_security_group_id = azurerm_network_security_group.hub.id
+}
+
 # --- NIC with IP forwarding (NVA requirement #1 of 2 — #2 is sysctl in cloud-init) ---
 resource "azurerm_network_interface" "hub" {
+  #checkov:skip=CKV_AZURE_119:owner=repository-maintainer; exact=azurerm_network_interface.hub; rationale=the hub NIC is the approved WireGuard public endpoint; control=Standard static IP, home-/32 SSH and UDP allows, and a terminal inbound deny restrict exposure.
   name                  = "nic-hub-ddi"
   location              = var.location
   resource_group_name   = var.resource_group_name
@@ -112,15 +129,16 @@ resource "azurerm_network_interface" "hub" {
   }
 }
 
-# --- The B1s VM (free tier: 750 hrs/mo for 12 months — run ONE) ---
+# --- The B1s VM (cost-bearing; review current subscription pricing before apply) ---
 resource "azurerm_linux_virtual_machine" "hub" {
-  name                = "vm-hub-ddi"
-  location            = var.location
-  resource_group_name = var.resource_group_name
-  size                = "Standard_B1s"
-  admin_username      = var.admin_username
-  network_interface_ids = [azurerm_network_interface.hub.id]
-  tags                = var.tags
+  name                       = "vm-hub-ddi"
+  location                   = var.location
+  resource_group_name        = var.resource_group_name
+  size                       = "Standard_B1s"
+  admin_username             = var.admin_username
+  allow_extension_operations = false
+  network_interface_ids      = [azurerm_network_interface.hub.id]
+  tags                       = var.tags
 
   admin_ssh_key {
     username   = var.admin_username
@@ -129,7 +147,7 @@ resource "azurerm_linux_virtual_machine" "hub" {
 
   os_disk {
     caching              = "ReadWrite"
-    storage_account_type = "Standard_LRS" # stay inside free 64GB allotment
+    storage_account_type = "Standard_LRS"
     disk_size_gb         = 30
   }
 
@@ -142,6 +160,7 @@ resource "azurerm_linux_virtual_machine" "hub" {
 
   custom_data = base64encode(templatefile("${path.module}/cloud-init.yml.tpl", {
     onprem_cidr        = var.onprem_address_space
+    wg_transfer_cidr   = var.wg_transfer_cidr
     lab_zone           = var.lab_zone
     onprem_dns_ip      = var.onprem_dns_ip # laptop BIND9 via tunnel
     wg_peer_public_key = var.wg_peer_public_key

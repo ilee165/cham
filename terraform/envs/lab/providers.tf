@@ -9,15 +9,18 @@ terraform {
   }
 
   backend "azurerm" {
-    # Values from bootstrap output. Blob lease provides state locking natively.
-    resource_group_name  = "rg-cham-tfstate"
-    storage_account_name = "REPLACE_FROM_BOOTSTRAP_OUTPUT"
-    container_name       = "tfstate"
-    key                  = "lab.tfstate"
+    # storage_account_name, subscription_id, and tenant_id come from a local
+    # gitignored *.tfbackend file. Blob leases provide state locking natively.
+    resource_group_name = "rg-cham-tfstate"
+    container_name      = "tfstate"
+    key                 = "lab.tfstate"
+    use_azuread_auth    = true
   }
 }
 
 provider "azurerm" {
+  subscription_id                 = var.subscription_id
+  resource_provider_registrations = "none"
   features {}
   # Local: az login. CI: OIDC federation — no client secrets anywhere.
 }

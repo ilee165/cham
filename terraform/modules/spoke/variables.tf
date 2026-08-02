@@ -51,6 +51,29 @@ variable "onprem_address_space" {
   default     = "10.20.0.0/16"
 }
 
+variable "wg_transfer_cidr" {
+  description = "WireGuard transfer network allowed to reach spoke workloads."
+  type        = string
+  default     = "172.16.0.0/24"
+}
+
+variable "enable_test_vm" {
+  description = "Create one temporary private verification VM in this spoke."
+  type        = bool
+  default     = false
+}
+
+variable "admin_username" {
+  description = "Administrator username for the temporary verification VM."
+  type        = string
+  default     = "labadmin"
+}
+
+variable "ssh_public_key" {
+  description = "SSH public key for the temporary private verification VM."
+  type        = string
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

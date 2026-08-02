@@ -1,7 +1,20 @@
 # Spoke module — reusable VNet with subnets, NSG, UDR to hub, and bidirectional peering.
 # Instantiated once per spoke from envs/lab/main.tf with different tfvars.
 
+terraform {
+  required_version = ">= 1.9"
+
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
+    }
+  }
+}
+
 resource "azurerm_virtual_network" "spoke" {
+  #checkov:skip=CKV_AZURE_182:owner=repository-maintainer; exact=azurerm_virtual_network.spoke; rationale=the approved cost-controlled lab intentionally has one hub DNS/NVA VM; control=saved-plan review and destroy/recreate recovery bound the single-node risk.
+  #checkov:skip=CKV_AZURE_183:owner=repository-maintainer; exact=azurerm_virtual_network.spoke; rationale=Checkov cannot resolve the module output to its local address; control=dns_servers is wired only to the hub VM static private IP 10.10.0.10.
   name                = "vnet-${var.name}"
   location            = var.location
   resource_group_name = var.resource_group_name
@@ -11,6 +24,7 @@ resource "azurerm_virtual_network" "spoke" {
 }
 
 resource "azurerm_subnet" "subnets" {
+  #checkov:skip=CKV2_AZURE_31:owner=repository-maintainer; exact=azurerm_subnet.subnets; rationale=Checkov does not correlate every for_each subnet instance; control=azurerm_subnet_network_security_group_association.spoke attaches the spoke NSG to every subnet instance using the same for_each map.
   for_each             = var.subnets
   name                 = "snet-${each.key}"
   resource_group_name  = var.resource_group_name
@@ -50,6 +64,18 @@ resource "azurerm_network_security_group" "spoke" {
   }
 
   security_rule {
+    name                       = "AllowWireGuardTransfer"
+    priority                   = 111
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = var.wg_transfer_cidr
+    destination_address_prefix = "*"
+  }
+
+  security_rule {
     name                       = "DenyOtherSpokes"
     priority                   = 200
     direction                  = "Inbound"
@@ -60,10 +86,8 @@ resource "azurerm_network_security_group" "spoke" {
     source_address_prefix      = "10.10.0.0/16" # whole Azure supernet
     destination_address_prefix = "*"
   }
-  # Default rules still allow VirtualNetwork after 200? No — priority 200 Deny
-  # fires before the default AllowVnetInBound (65000). Intra-spoke traffic is
-  # covered because it never leaves the VNet... it does hit the NSG. See
-  # AllowIntraSpoke below.
+  # DenyOtherSpokes runs before Azure's default AllowVnetInBound rule. Explicit
+  # hub, on-prem, transfer-network, and intra-spoke allows remain authoritative.
 
   security_rule {
     name                       = "AllowIntraSpoke"

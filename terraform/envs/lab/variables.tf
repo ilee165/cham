@@ -19,6 +19,14 @@ variable "lab_zone" {
 variable "home_ip" {
   description = "Home public IP /32. Set via TF_VAR_home_ip or terraform.tfvars (gitignored). NOT committed."
   type        = string
+
+  validation {
+    condition = (
+      can(cidrhost(var.home_ip, 0)) &&
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/32$", var.home_ip))
+    )
+    error_message = "home_ip must be one valid IPv4 host expressed as a /32."
+  }
 }
 
 variable "ssh_public_key" { type = string }
@@ -34,10 +42,22 @@ variable "onprem_dns_ip" {
   default     = "172.16.0.2"
 }
 
+variable "wg_transfer_cidr" {
+  description = "WireGuard transfer network allowed to reach hub DNS and spoke workloads."
+  type        = string
+  default     = "172.16.0.0/24"
+}
+
 variable "wg_peer_public_key" { type = string }
 
 variable "enable_private_resolver" {
-  description = "~$360/mo when true. Single-session use only."
+  description = "Cost-bearing Azure DNS Private Resolver feature. Keep false during Phase 2."
+  type        = bool
+  default     = false
+}
+
+variable "enable_test_vm" {
+  description = "Create temporary private verification VMs in both spokes."
   type        = bool
   default     = false
 }
