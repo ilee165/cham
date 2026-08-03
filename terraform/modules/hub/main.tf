@@ -52,6 +52,11 @@ resource "azurerm_network_security_group" "hub" {
   resource_group_name = var.resource_group_name
   tags                = var.tags
 
+  # Rules 100-120 are destination-scoped to the hub VM, not "*": this NSG is
+  # associated to BOTH hub subnets, so a wildcard destination would silently
+  # extend SSH/WireGuard/DNS exposure to anything later placed in snet-shared.
+  # (NSGs evaluate after DNAT, so traffic to the public IP matches the
+  # private hub_vm_ip here.)
   security_rule {
     name                       = "AllowWireGuardFromHome"
     priority                   = 100
@@ -61,7 +66,7 @@ resource "azurerm_network_security_group" "hub" {
     source_port_range          = "*"
     destination_port_range     = "51820"
     source_address_prefix      = var.home_ip # /32 — never widen this
-    destination_address_prefix = "*"
+    destination_address_prefix = var.hub_vm_ip
   }
 
   security_rule {
@@ -73,7 +78,7 @@ resource "azurerm_network_security_group" "hub" {
     source_port_range          = "*"
     destination_port_range     = "22"
     source_address_prefix      = var.home_ip
-    destination_address_prefix = "*"
+    destination_address_prefix = var.hub_vm_ip
   }
 
   security_rule {
@@ -85,7 +90,7 @@ resource "azurerm_network_security_group" "hub" {
     source_port_range          = "*"
     destination_port_ranges    = ["53"]
     source_address_prefixes    = ["10.10.0.0/16", var.onprem_address_space, var.wg_transfer_cidr]
-    destination_address_prefix = "*"
+    destination_address_prefix = var.hub_vm_ip
   }
 
   security_rule {
