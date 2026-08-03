@@ -132,6 +132,14 @@ resource "azurerm_network_security_group" "hub" {
     destination_address_prefix = var.onprem_address_space
   }
 
+  # ICMP note: ping to the hub VM is INTENTIONALLY blocked. Rules 100-120 are
+  # port-scoped (ICMP has no ports, so they never match), rules 130/135/140
+  # exclude VNet destinations, and this deny fires before the default
+  # AllowVnetInBound — so "DNS works but ping 10.10.0.10 fails" is expected
+  # behavior during verification, not an NVA fault. If ping diagnostics are
+  # ever wanted, add an Allow with protocol = "Icmp",
+  # destination_port_range = "*", sources 10.10.0.0/16 / var.wg_transfer_cidr /
+  # var.onprem_address_space, at a priority below 4000.
   security_rule {
     name                       = "DenyAllOtherInbound"
     priority                   = 4000
