@@ -46,18 +46,50 @@ variable "ssh_public_key" { type = string }
 variable "onprem_address_space" {
   type    = string
   default = "10.20.0.0/16"
+
+  validation {
+    condition = (
+      can(cidrhost(var.onprem_address_space, 0)) &&
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.onprem_address_space))
+    )
+    error_message = "onprem_address_space must be an IPv4 CIDR like 10.20.0.0/16 — it renders into BIND ACLs, WireGuard AllowedIPs, NSG prefixes, and spoke UDRs, where a typo becomes a boot-time BIND failure instead of a plan error."
+  }
 }
 
 variable "onprem_dns_ip" {
   description = "Laptop BIND9 tunnel IP"
   type        = string
   default     = "172.16.0.2"
+
+  validation {
+    condition = (
+      can(cidrhost("${var.onprem_dns_ip}/32", 0)) &&
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$", var.onprem_dns_ip))
+    )
+    error_message = "onprem_dns_ip must be a single IPv4 address without a mask, e.g. 172.16.0.2."
+  }
+
+  validation {
+    condition = anytrue([
+      for cidr in [var.wg_transfer_cidr, var.onprem_address_space] :
+      try(cidrsubnet(format("%s/%s", var.onprem_dns_ip, split("/", cidr)[1]), 0, 0) == cidrsubnet(cidr, 0, 0), false)
+    ])
+    error_message = "onprem_dns_ip must lie inside wg_transfer_cidr or onprem_address_space — the hub only routes those prefixes into the WireGuard tunnel (AllowedIPs), so a DNS target outside both can never be reached."
+  }
 }
 
 variable "wg_transfer_cidr" {
   description = "WireGuard transfer network allowed to reach hub DNS and spoke workloads."
   type        = string
   default     = "172.16.0.0/24"
+
+  validation {
+    condition = (
+      can(cidrhost(var.wg_transfer_cidr, 0)) &&
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.wg_transfer_cidr))
+    )
+    error_message = "wg_transfer_cidr must be an IPv4 CIDR like 172.16.0.0/24 — the WireGuard interface address is derived from it and it renders into BIND ACLs and NSG prefixes."
+  }
 }
 
 variable "wg_peer_public_key" { type = string }
