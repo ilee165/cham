@@ -5,9 +5,12 @@
 terraform {
   required_version = ">= 1.9"
   required_providers {
+    # Floor matches the real requirement: cloudflare_record.content only
+    # exists in late 4.x — "~> 4.0" would admit releases where init against
+    # a rebuilt lockfile succeeds but the config cannot plan.
     cloudflare = {
       source  = "cloudflare/cloudflare"
-      version = "~> 4.0"
+      version = "~> 4.52"
     }
   }
   backend "azurerm" {
