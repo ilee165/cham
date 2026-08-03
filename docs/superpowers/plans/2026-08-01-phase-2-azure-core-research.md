@@ -6,7 +6,7 @@
 
 ## Executive finding
 
-The existing Phase 2 plan has the right architectural center—hub/spoke networking, a B1s NVA/DNS VM, Private DNS, flag-gated verification VMs, remote state, and live apply/destroy proof—but it is not ready to execute unchanged.
+The existing Phase 2 plan has the right architectural center—hub/spoke networking, a small burstable NVA/DNS VM, Private DNS, flag-gated verification VMs, remote state, and live apply/destroy proof—but it is not ready to execute unchanged.
 
 The revised plan must:
 

@@ -8,6 +8,12 @@ variable "location" {
   default = "eastus"
 }
 
+variable "vm_size" {
+  description = "Azure VM SKU for the temporary verification VM."
+  type        = string
+  default     = "Standard_B2ats_v2"
+}
+
 variable "resource_group_name" {
   type = string
 }

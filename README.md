@@ -31,10 +31,13 @@ the lab, both answers managed here.
 | `docs` | Architecture, ADRs, runbook |
 
 ## Cost posture
-Core topology is free-tier (VNets/NSGs/UDRs free; one B1s VM in the
-12-month allowance). Azure DNS Private Resolver (~$360/mo both endpoints)
-is `count`-gated behind `enable_private_resolver` and used in single
-prorated sessions. `destroy.yml` is the kill switch — Azure has no spend cap.
+Core network objects have no fixed charge. Phase 2 uses a parameterized
+B2ats v2 VM in North Central US and is intended to be applied for a bounded
+verification session, then destroyed the same day. Free-account benefits are
+not assumed. Azure DNS Private Resolver (~$360/mo both endpoints) is
+`count`-gated behind `enable_private_resolver` and used only in explicitly
+approved prorated sessions. `destroy.yml` is the kill switch — an Azure budget
+notification is not a spend cap.
 
 See [docs/decisions.md](docs/decisions.md) for why each of those calls
 was made. Start with ADR-001.

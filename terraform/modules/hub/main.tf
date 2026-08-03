@@ -1,4 +1,4 @@
-# Hub module — hub VNet plus the B1s VM running WireGuard + BIND9.
+# Hub module — hub VNet plus the burstable VM running WireGuard + BIND9.
 # This VM is the NVA: spokes route through it, and it forwards DNS
 # conditionally to on-prem (lab zone) or Azure-provided DNS (everything else).
 
@@ -129,12 +129,12 @@ resource "azurerm_network_interface" "hub" {
   }
 }
 
-# --- The B1s VM (cost-bearing; review current subscription pricing before apply) ---
+# --- Cost-bearing hub VM; review current subscription pricing before apply ---
 resource "azurerm_linux_virtual_machine" "hub" {
   name                       = "vm-hub-ddi"
   location                   = var.location
   resource_group_name        = var.resource_group_name
-  size                       = "Standard_B1s"
+  size                       = var.vm_size
   admin_username             = var.admin_username
   allow_extension_operations = false
   network_interface_ids      = [azurerm_network_interface.hub.id]

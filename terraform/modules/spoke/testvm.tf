@@ -17,7 +17,7 @@ resource "azurerm_linux_virtual_machine" "testvm" {
   name                  = "vm-test-${var.name}"
   location              = var.location
   resource_group_name   = var.resource_group_name
-  size                  = "Standard_B1s"
+  size                  = var.vm_size
   admin_username        = var.admin_username
   network_interface_ids = [azurerm_network_interface.testvm[0].id]
   tags                  = var.tags

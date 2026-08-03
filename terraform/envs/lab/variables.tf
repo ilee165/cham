@@ -1,6 +1,12 @@
 variable "location" {
   type    = string
-  default = "eastus"
+  default = "northcentralus"
+}
+
+variable "vm_size" {
+  description = "VM SKU shared by the hub appliance and temporary spoke verification VMs."
+  type        = string
+  default     = "Standard_B2ats_v2"
 }
 
 variable "subscription_id" { type = string }

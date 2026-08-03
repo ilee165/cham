@@ -3,12 +3,13 @@
 Short ADRs. Format: context → decision → tradeoff accepted. These are
 interview material as much as documentation.
 
-## ADR-001: BIND9 on a B1s VM instead of Azure DNS Private Resolver
+## ADR-001: BIND9 on a burstable VM instead of Azure DNS Private Resolver
 - **Context:** Hybrid resolution needs a forwarder in the hub. Private
   Resolver is the managed answer at ~$180/mo per endpoint (~$360 both ways);
-  a B1s VM is free-tier.
-- **Decision:** BIND9 on the hub VM as the daily driver; Private Resolver
-  exists as a flag-gated module exercised in one paid session (~$2).
+  a small VM used only during bounded lab sessions has materially lower cost.
+- **Decision:** BIND9 on a parameterized B2ats v2 hub VM in North Central US;
+  Private Resolver remains flag-gated. The VM choice matches current
+  subscription availability, but no free-service entitlement is assumed.
 - **Tradeoff accepted:** we own patching, HA (none — single VM), and zone
   redundancy that the managed service would provide. Right call at lab
   scale; at production scale the calculus reverses and the flag flip is

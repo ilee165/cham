@@ -102,9 +102,12 @@ The final plan contains:
 These are current checkpoint considerations, not plan defects:
 
 - `Microsoft.Storage` was registered after explicit Checkpoint A approval and now reports `Registered`.
+- `Microsoft.Network` and `Microsoft.Compute` were registered after explicit approval and now report `Registered`.
 - The signed-in Azure user has Owner at subscription scope, which includes the required provider-registration and role-assignment permissions.
 - Entra role propagation may require bounded retry.
 - Azure usage remains billable according to the user's offer; the bootstrap uses Standard LRS and incurs storage capacity, operation, and any transfer charges.
+- The revised base plan's current North Central US always-on public retail-rate baseline is approximately USD 12.55/month; a conservative four-hour session estimate is USD 0.08 before variable DNS, disk-operation, peering, egress, tax, and state-storage charges. No credits or discounts are assumed; the plan includes a USD 50 monthly budget with 50% and 90% notifications.
+- North Central US BASv2 quota is four vCPUs and current post-apply usage is two. The explicitly approved request for six was accepted for processing and then rejected with `ResourceNotAvailableForOffer`; the effective limit remains four. Checkpoint C needs an explicitly approved separate-family test SKU.
 - Live negative tests can fail; any such result blocks closeout.
 
 ## Live-verification status
@@ -115,11 +118,12 @@ These are current checkpoint considerations, not plan defects:
 | TFLint | PASS — 0 issues |
 | Checkov | PASS — 38 passed, 0 failed, 15 documented skips |
 | Bootstrap plan/apply | PASS — approved recovery applied 3 create, 1 in-place update, 0 delete; six expected resources tracked; post-apply plan has no changes |
-| Base plan/apply | DEFERRED — no Azure mutation authorized |
-| DNS/routing/NSG tests | DEFERRED — no lab deployed |
-| Test-VM proof | DEFERRED — no temporary workload authorized |
-| Destroy/recreate proof | DEFERRED — no lab deployed |
+| Lab backend | PASS — Entra initialization succeeds; remote lab state tracks 32 base resources; ignored local backend metadata is ACL-restricted |
+| Base plan/apply | PASS — approved North Central US/B2ats v2 plan with SHA-256 `4edde8bde9dddb3a534756f177380fbd69629dbdf6feb7082cf76204fde0bfd0` applied 32 create, 0 change, 0 destroy; a fresh plan reports no changes and no warnings |
+| DNS/routing/NSG tests | BASE PASS — peerings, hub guest forwarding/SNAT, BIND, private DNS, named NSGs, terminal deny, and approved-source SSH pass; spoke paired tests await Checkpoint C |
+| Test-VM proof | BLOCKED AT PREPARATION — Azure rejected the BASv2 quota increase; `Standard_D2als_v6` is the smallest viable x64 separate-family candidate, but using it requires explicit approval before a fresh plan is generated |
+| Destroy/recreate proof | DEFERRED — base lab is deployed; no destroy plan has been approved or applied |
 
 ## Final verification statement
 
-The Phase 2 plan remains security/cost gated. Checkpoint A registration and bootstrap are complete after the explicitly approved zero-delete recovery plan. All six expected resources are tracked, live storage controls and RBAC match the configuration, Entra backend access succeeds, the completed state is protected and backed up outside the repository, and a fresh plan reports no changes. Backend initialization and the base-stack Checkpoint B remain pending; no lab resources have been applied.
+The Phase 2 plan remains security/cost gated. Checkpoint A registration and bootstrap are complete after the explicitly approved zero-delete recovery plan. All six expected bootstrap resources are tracked, live storage controls and RBAC match the configuration, and the completed bootstrap state is protected and backed up outside the repository. The lab Entra backend now tracks the 32-resource base stack, local inputs and key material remain protected, and all required resource providers, including `Microsoft.Quota`, are registered. The explicitly approved North Central US/B2ats v2 saved plan applied cleanly at Checkpoint B; live base checks pass and Terraform reports no drift. Sanitized evidence is in `docs/evidence/phase2/checkpoint-b.md`. Azure rejected the approved BASv2 quota increase as unavailable for this offer; capacity evidence and the separate-family candidate are in `docs/evidence/phase2/checkpoint-c-capacity.md`. No Checkpoint C plan, temporary verification VM, resolver resource, or destroy action has been applied.

@@ -15,6 +15,7 @@ resource "azurerm_resource_group" "lab" {
 module "hub" {
   source              = "../../modules/hub"
   location            = var.location
+  vm_size             = var.vm_size
   resource_group_name = azurerm_resource_group.lab.name
   home_ip             = var.home_ip
   ssh_public_key      = var.ssh_public_key
@@ -30,6 +31,7 @@ module "spoke_app" {
   source               = "../../modules/spoke"
   name                 = "app"
   location             = var.location
+  vm_size              = var.vm_size
   resource_group_name  = azurerm_resource_group.lab.name
   address_space        = "10.10.4.0/22"
   subnets              = { workload = "10.10.4.0/24" }
@@ -49,6 +51,7 @@ module "spoke_mgmt" {
   source               = "../../modules/spoke"
   name                 = "mgmt"
   location             = var.location
+  vm_size              = var.vm_size
   resource_group_name  = azurerm_resource_group.lab.name
   address_space        = "10.10.8.0/22"
   subnets              = { tools = "10.10.8.0/24" }

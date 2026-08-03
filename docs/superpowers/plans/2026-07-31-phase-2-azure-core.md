@@ -1,10 +1,10 @@
 # Phase 2 — Azure Core Candidate Implementation Plan
 
-**Status:** Local Tasks 1-3 and 4.1-4.2 are implemented and statically validated; Azure authentication and Checkpoints A-D remain pending.
+**Status:** Tasks 1-6 are implemented and live-verified. Revised Checkpoint B applied 32 create, 0 change, 0 destroy from the approved saved plan; Terraform reports no drift. Azure rejected the approved BASv2 quota increase as unavailable for this offer, so Checkpoint C is blocked pending explicit approval of a separate-family test SKU. No temporary verification workload has been planned or applied.
 **Lifecycle owner:** GSD. Eventual execution uses gsd-execute-phase only after approval.
 **Research basis:** 2026-08-01-phase-2-azure-core-research.md.
 
-> EXECUTION GATE: User plan approval authorizes repository code work. Tool installation/download was separately approved and completed on 2026-08-02. Azure login and provider readiness, bootstrap apply, base apply, test-VM enablement, and destroy remain gated as specified below. Every cloud mutation requires separate approval at execution time.
+> EXECUTION GATE: User plan approval authorizes repository code work. Tool installation/download, Azure login, and the explicitly approved Checkpoint A bootstrap are complete. Base apply, test-VM enablement, and destroy remain gated as specified below. Every additional cloud mutation requires separate approval at execution time.
 
 ## Goal
 
@@ -13,7 +13,7 @@ Take the authored Terraform from an unvalidated baseline to a reproducible Azure
 ## Architecture
 
 - One lab resource group: rg-cham-lab.
-- Hub VNet 10.10.0.0/22 with one Standard_B1s Linux VM at 10.10.0.10.
+- North Central US hub VNet 10.10.0.0/22 with one Standard_B2ats_v2 Linux VM at 10.10.0.10.
 - The hub VM is both a BIND9 DNS forwarder and a network virtual appliance.
 - App spoke 10.10.4.0/22 and management spoke 10.10.8.0/22, instantiated from one module.
 - Bidirectional hub/spoke peerings; no direct spoke trust.
@@ -252,7 +252,7 @@ resource "azurerm_linux_virtual_machine" "testvm" {
   name                  = "vm-test-${var.name}"
   location              = var.location
   resource_group_name   = var.resource_group_name
-  size                  = "Standard_B1s"
+  size                  = var.vm_size
   admin_username        = var.admin_username
   network_interface_ids = [azurerm_network_interface.testvm[0].id]
   tags                  = var.tags
@@ -547,6 +547,21 @@ Plan invariants:
 - Private DNS links all three VNets;
 - no unexpected replacement/deletion.
 
+**Execution evidence — 2026-08-02:**
+
+- The lab root initialized successfully against the Entra-authenticated Azure Blob backend. The remote lab state has zero managed resources, and no local root state exists.
+- The backend configuration, Terraform variables, and saved plan are gitignored and ACL-restricted to the active Windows user and SYSTEM. Dedicated SSH and WireGuard keypairs are stored outside the repository; only public keys enter Terraform inputs, and private key material is absent from the saved-plan JSON.
+- The original East US/B1s plan, SHA-256 `7795f39964499a48a8b60080fa1a7e7114205b35699b77f49778c16fe6d6619c`, was blocked before apply because Azure reported `Standard_B1s` as `NotAvailableForSubscription`. It remains ignored and ACL-protected as historical evidence; it is superseded and must not be applied.
+- After explicit approval, `vm_size` was parameterized across the lab, hub, and spoke modules; the lab root and protected local inputs now use North Central US and `Standard_B2ats_v2` for both hub and temporary verification VMs.
+- The revised saved plan was generated with Terraform 1.15.8 and locked AzureRM 4.81.0. Its SHA-256 is `4edde8bde9dddb3a534756f177380fbd69629dbdf6feb7082cf76204fde0bfd0` and it contains 32 creates, 0 changes, 0 destroys, and 0 warnings.
+- Revised planned resources comprise one subscription budget, one resource group, three VNets, four subnets, four peerings, three NSGs and their four subnet associations, two route tables and their two subnet associations, one Standard static public IP, one NIC, one Standard_B2ats_v2 Linux VM with a 30 GB Standard_LRS OS disk, one Private DNS zone and A record, and three Private DNS VNet links.
+- Both feature flags are false. The plan contains zero Private Resolver resources, zero test-workload resources, exactly one public IP, four peerings, three Private DNS links, two spokes using hub DNS, four routes using the hub NVA next hop, and one highest-priority all-source inbound deny.
+- The current North Central US public retail-rate baseline for an always-on deployment is approximately USD 12.55/month: B2ats v2 Linux compute, Standard static IPv4, S4 Standard HDD capacity, and one Private DNS zone. A conservative four-hour session estimate is USD 0.08. DNS queries/record sets, disk operations, peering and Internet transfer, taxes, and the existing state-storage footprint remain variable. No credit, free-tier, reservation, savings-plan, or negotiated discount is assumed.
+- A monthly USD 50 subscription budget with enabled 50% and 90% notifications is included in the plan.
+- `Microsoft.Consumption`, `Microsoft.Storage`, `Microsoft.Network`, and `Microsoft.Compute` are registered. Network and Compute registration was explicitly approved and completed before the original plan's SKU-readiness guard blocked its apply.
+- North Central US has a four-vCPU `standardBasv2Family` quota. The base hub consumes two vCPUs; two simultaneous B2ats v2 verification VMs would require six total. Azure accepted and then rejected the explicitly approved request for six with `ResourceNotAvailableForOffer`. Checkpoint C now requires explicit approval of a separate-family test SKU before its saved plan can be generated.
+- No lab resources were created while producing or reviewing this plan.
+
 ---
 
 ## Checkpoint B — Base plan, subscription, and cost
@@ -562,6 +577,8 @@ Present:
 - rollback path.
 
 No base apply without approval of this fresh plan.
+
+**Revised Checkpoint B status — applied and verified:** On 2026-08-02, the user explicitly approved `checkpoint-b-ncus-b2ats-v2.tfplan` with SHA-256 `4edde8bde9dddb3a534756f177380fbd69629dbdf6feb7082cf76204fde0bfd0`. The apply completed with 32 create, 0 change, and 0 destroy. All four peerings are Connected; the hub VM, cloud-init, BIND, forwarding, SNAT, private DNS, NSGs, and budget passed their base checks; resolver and test resources remain absent; and a fresh Terraform plan reports no changes. Sanitized evidence is recorded in `docs/evidence/phase2/checkpoint-b.md`. The bootstrap stack is retained. Rollback remains deletion through a separately generated and reviewed saved destroy plan.
 
 ---
 
@@ -603,7 +620,7 @@ terraform -chdir=terraform/envs/lab plan -out=testvm.tfplan
 terraform -chdir=terraform/envs/lab show -no-color testvm.tfplan
 ~~~
 
-Expected delta: one private NIC and Standard_B1s VM per spoke, no public IP, no unrelated change.
+Expected delta: one private NIC and Standard_B2ats_v2 VM per spoke, no public IP, no unrelated change.
 
 ---
 
@@ -702,19 +719,19 @@ Review evidence for account IDs, IPs, email, keys, backend names, and raw state/
 | Requirement | Planned proof | Live status |
 |---|---|---|
 | Tool/provider correctness | Gate 0 and Task 3 | Passed locally 2026-08-02: fmt/validate, TFLint, and Checkov |
-| Portable secure state | Task 4 / Checkpoint A | Bootstrap complete; post-apply plan is clean, state is protected, backend initialization pending |
-| Peerings | Task 6 | Deferred |
-| DNS through hub | Tasks 6 and 8 | Deferred |
-| Private DNS auto-registration | Task 8 | Deferred |
-| UDR/NVA forwarding | Tasks 6 and 8 | Deferred |
-| Hub SNAT | Task 8 | Deferred |
+| Portable secure state | Task 4 / Checkpoint A | PASS — bootstrap retained, state protected, Entra backend initialized, and lab state tracks 32 base resources |
+| Peerings | Task 6 | PASS — all four peerings Connected with forwarded traffic enabled |
+| DNS through hub | Tasks 6 and 8 | PARTIAL — Azure-provided DNS and local BIND resolve the seed record; spoke proof awaits Checkpoint C |
+| Private DNS auto-registration | Task 8 | PARTIAL — three links Completed and two registration links enabled; VM-record proof awaits Checkpoint C |
+| UDR/NVA forwarding | Tasks 6 and 8 | PARTIAL — Azure NIC and guest forwarding pass; spoke effective-route proof awaits Checkpoint C |
+| Hub SNAT | Task 8 | PARTIAL — one expected MASQUERADE rule exists; spoke egress equality awaits Checkpoint C |
 | Spoke isolation | Task 8 paired tests | Deferred |
-| Home-only ingress | Task 8 paired tests | Deferred |
-| Resolver disabled | Tasks 3, 5, and 6 | Deferred |
-| Cost review | Checkpoints A–C | Deferred |
+| Home-only ingress | Task 8 paired tests | PARTIAL — single-`/32` rules and approved-source SSH pass; negative off-source proof awaits Checkpoint C |
+| Resolver disabled | Tasks 3, 5, and 6 | PASS — no resolver resources are deployed |
+| Cost review | Checkpoints A–C | PASS through Checkpoint B; Checkpoint C incremental cost pending |
 | Clean destroy | Tasks 9–10 / Checkpoint D | Deferred |
 | Recreate readiness | Task 10 no-apply plan | Deferred |
-| Evidence secrecy | Tasks 3, 6, 8, and 10 | Deferred |
+| Evidence secrecy | Tasks 3, 6, 8, and 10 | PASS through Checkpoint B — live evidence is sanitized |
 
 ## Exit criteria
 
