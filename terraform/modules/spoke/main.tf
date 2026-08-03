@@ -32,7 +32,12 @@ resource "azurerm_subnet" "subnets" {
   address_prefixes     = [each.value]
 }
 
-# --- NSG: deny spoke-to-spoke direct, allow via hub only ---
+# --- NSG: spoke-to-spoke is fully denied, including via the hub. The hub NSG
+# has no inter-spoke transit allow and the NVA does not SNAT east-west, so
+# forwarded inter-spoke packets are dropped at the hub NIC (DenyAllOtherInbound)
+# and would hit DenyOtherSpokes here even if forwarded. To permit hub transit
+# later: add a hub NSG inbound allow (spoke -> spoke) AND an allow for the
+# sibling-spoke CIDR here with a lower priority number than DenyOtherSpokes (200). ---
 resource "azurerm_network_security_group" "spoke" {
   name                = "nsg-${var.name}"
   location            = var.location
