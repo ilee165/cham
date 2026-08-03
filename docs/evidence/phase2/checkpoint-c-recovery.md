@@ -25,7 +25,7 @@ The VM-family quotas are not exhausted: BASv2 usage is 2 of 4 and Dalsv6 usage i
 - The user explicitly approved requesting North Central US Total Regional Cores from 4 to 6.
 - Azure accepted the request for processing, then reported terminal `Failed` state with `ResourceNotAvailableForOffer`.
 - A fresh usage check still reports Total Regional Cores at 4 of 4; the required effective limit of at least six was never reached.
-- The exact recovery plan remained unchanged at SHA-256 `cda9d41188a4c3cb7920208a8fefbf77349d003e3672181cf463afb1325faf35` with 1 create, 1 in-place update, and 0 deletes.
+- At the time of the quota attempt, the recovery plan remained unchanged at SHA-256 `cda9d41188a4c3cb7920208a8fefbf77349d003e3672181cf463afb1325faf35` with 1 create, 1 in-place update, and 0 deletes. It later became superseded when post-review source fixes changed the embedded NSG configuration.
 - In accordance with the conditional approval, the plan was not applied, neither deallocated VM was started, no remaining topology test ran, and no Checkpoint D destroy action occurred.
 
 ## Bounded app-side tests
@@ -54,19 +54,21 @@ The hub NSG now declares two source- and destination-scoped inbound rules ahead 
 
 These rules do not allow spoke traffic to arbitrary hub-local services and do not widen the existing home-only SSH or WireGuard rules.
 
-## Saved recovery artifact
+## Superseded recovery artifact — historical evidence only
 
 | Property | Value |
 |---|---|
 | File | `checkpoint-c-recovery-regional-cores-nva-nsg.tfplan` |
+| Retired local name | `SUPERSEDED-DO-NOT-APPLY-checkpoint-c-recovery-regional-cores-nva-nsg.tfplan` |
 | SHA-256 | `cda9d41188a4c3cb7920208a8fefbf77349d003e3672181cf463afb1325faf35` |
+| Status | **SUPERSEDED — NEVER APPLY**; predates the post-review NSG and state-shape corrections |
 | Terraform summary | 1 create, 1 in-place update, 0 destroy |
 | Create | Management `Standard_D2als_v6` VM only |
 | Update | Hub NSG only; adds the two scoped transit rules |
 | Terraform warnings | 0 |
 | File protection | Gitignored; inherited ACLs removed; access limited to the active user and SYSTEM |
 
-Saved-plan JSON inspection confirmed no resolver, public-IP, replacement, or delete action and no private-key marker.
+Historical saved-plan JSON inspection confirmed no resolver, public-IP, replacement, or delete action and no private-key marker. That inspection does not make the artifact current: a new state-backed plan from current `HEAD` is mandatory before any apply.
 
 ## Validation and current cost state
 

@@ -5,10 +5,11 @@ locals {
   # NIC/VM replacement. one() instead fails at plan time when the map grows
   # beyond one subnet and no explicit test_vm_subnet_key was chosen.
   test_vm_subnet_key = var.test_vm_subnet_key != null ? var.test_vm_subnet_key : one(keys(var.subnets))
+  test_nic_enabled   = var.enable_test_nic != null ? var.enable_test_nic : var.enable_test_vm
 }
 
 resource "azurerm_network_interface" "testvm" {
-  count               = var.enable_test_vm ? 1 : 0
+  count               = local.test_nic_enabled ? 1 : 0
   name                = "nic-testvm-${var.name}"
   location            = var.location
   resource_group_name = var.resource_group_name

@@ -168,6 +168,27 @@ resource "azurerm_network_security_group" "hub" {
     source_address_prefixes      = [var.onprem_address_space, var.wg_transfer_cidr]
     destination_address_prefixes = var.spoke_address_spaces
   }
+
+  # The inbound resolver endpoint is reached through this NVA by packets
+  # decapsulated from WireGuard. Their source prefixes are not part of the
+  # Azure VirtualNetwork service tag, so the default outbound allow does not
+  # match. Keep the exception DNS-only and create it only with the paid
+  # resolver feature.
+  dynamic "security_rule" {
+    for_each = var.enable_private_resolver ? [1] : []
+
+    content {
+      name                       = "AllowDnsResolverFromTunnel"
+      priority                   = 120
+      direction                  = "Outbound"
+      access                     = "Allow"
+      protocol                   = "*"
+      source_port_range          = "*"
+      destination_port_range     = "53"
+      source_address_prefixes    = [var.onprem_address_space, var.wg_transfer_cidr]
+      destination_address_prefix = var.resolver_inbound_subnet_cidr
+    }
+  }
 }
 
 resource "azurerm_subnet_network_security_group_association" "vpn" {
@@ -227,7 +248,10 @@ resource "azurerm_linux_virtual_machine" "hub" {
     version   = "latest"
   }
 
-  custom_data = base64encode(templatefile("${path.module}/cloud-init.yml.tpl", {
+  # Normalize the checked-out template to LF before encoding. Without this,
+  # Windows CRLF checkout changes produce a byte-only custom_data diff and
+  # force replacement of the hub VM even when every rendered line is equal.
+  custom_data = base64encode(replace(templatefile("${path.module}/cloud-init.yml.tpl", {
     onprem_cidr      = var.onprem_address_space
     wg_transfer_cidr = var.wg_transfer_cidr
     # WG interface address derived from wg_transfer_cidr (host .1, same mask)
@@ -237,5 +261,5 @@ resource "azurerm_linux_virtual_machine" "hub" {
     lab_zone           = var.lab_zone
     onprem_dns_ip      = var.onprem_dns_ip # laptop BIND9 via tunnel
     wg_peer_public_key = var.wg_peer_public_key
-  }))
+  }), "\r\n", "\n"))
 }

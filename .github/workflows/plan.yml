@@ -1,23 +1,104 @@
 name: terraform-plan
+
+#checkov:skip=CKV_GHA_7:owner=repository-maintainer; exact=workflow_dispatch inputs; rationale=manual booleans select only the contents of a non-applying saved plan; control=the run is pinned to its Git commit and produces a manifest/hash, while apply independently verifies the current main commit, run identity, artifact, and environment approval.
 on:
   pull_request:
     paths: ["terraform/**"]
+  workflow_dispatch:
+    inputs:
+      enable_test_vm_app:
+        description: Preserve/create the app test VM in this plan
+        required: true
+        type: boolean
+        default: false
+      enable_test_vm_mgmt:
+        description: Preserve/create the management test VM in this plan
+        required: true
+        type: boolean
+        default: false
+      enable_test_nic_app:
+        description: Preserve/create the app test NIC in this plan
+        required: true
+        type: boolean
+        default: false
+      enable_test_nic_mgmt:
+        description: Preserve/create the management test NIC in this plan
+        required: true
+        type: boolean
+        default: false
+      enable_private_resolver:
+        description: Enable the cost-bearing DNS Private Resolver in this plan
+        required: true
+        type: boolean
+        default: false
 
 permissions:
-  id-token: write     # OIDC federation to Azure — no client secrets
   contents: read
-  pull-requests: write
 
 jobs:
-  plan:
+  static:
+    name: Credential-free Terraform checks
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: terraform/envs/lab
+    permissions:
+      contents: read
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9.0"
+
+      - name: Terraform format
+        run: terraform fmt -check -recursive terraform
+
+      - uses: terraform-linters/setup-tflint@v4
+
+      - name: TFLint
+        run: tflint --init && tflint --recursive
+        working-directory: terraform
+
+      - name: Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform
+          quiet: true
+          soft_fail: false
+
+      - name: Terraform validate without a backend or Azure credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          for directory in terraform/bootstrap terraform/envs/lab terraform/cloudflare; do
+            terraform -chdir="$directory" init -backend=false -input=false
+            terraform -chdir="$directory" validate -no-color
+          done
+
+  plan:
+    name: Saved plan from current main
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: static
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_IN_AUTOMATION: "true"
+    defaults:
+      run:
+        shell: bash
+        working-directory: terraform/envs/lab
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9.0"
 
       - name: Azure login (OIDC)
         uses: azure/login@v2
@@ -26,43 +107,78 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Lint
+      - name: Resolve remote-state account
+        id: backend
         run: |
-          terraform fmt -check -recursive ../..
-      - uses: terraform-linters/setup-tflint@v4
-      - run: tflint --init && tflint --recursive
-        working-directory: terraform
+          set -euo pipefail
+          storage_account_name="$(az storage account list \
+            --resource-group rg-cham-tfstate \
+            --query '[0].name' \
+            --output tsv)"
+          if [[ -z "$storage_account_name" || "$storage_account_name" == "None" ]]; then
+            echo "::error::No Terraform state storage account was found in rg-cham-tfstate."
+            exit 1
+          fi
+          echo "::add-mask::$storage_account_name"
+          echo "name=$storage_account_name" >> "$GITHUB_OUTPUT"
 
-      - name: Security scan (checkov)
-        uses: bridgecrewio/checkov-action@v12
-        with:
-          directory: terraform
-          quiet: true
-          soft_fail: false
-
-      - name: Plan
+      - name: Create saved plan and sanitized manifest
+        id: plan
         env:
-          ARM_USE_OIDC: "true"
           TF_VAR_home_ip: ${{ secrets.HOME_IP }}
           TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
           TF_VAR_wg_peer_public_key: ${{ secrets.WG_PEER_PUBLIC_KEY }}
           TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
           TF_VAR_budget_start_date: ${{ vars.BUDGET_START_DATE }}
+          TF_VAR_enable_test_vm_app: ${{ inputs.enable_test_vm_app }}
+          TF_VAR_enable_test_vm_mgmt: ${{ inputs.enable_test_vm_mgmt }}
+          TF_VAR_enable_test_nic_app: ${{ inputs.enable_test_nic_app }}
+          TF_VAR_enable_test_nic_mgmt: ${{ inputs.enable_test_nic_mgmt }}
+          TF_VAR_enable_private_resolver: ${{ inputs.enable_private_resolver }}
         run: |
-          terraform init
-          terraform plan -no-color -out=tfplan
-          terraform show -no-color tfplan > plan.txt
+          set -euo pipefail
+          terraform init -input=false -reconfigure \
+            -backend-config="storage_account_name=${{ steps.backend.outputs.name }}" \
+            -backend-config="subscription_id=${ARM_SUBSCRIPTION_ID}" \
+            -backend-config="tenant_id=${ARM_TENANT_ID}"
+          terraform plan -input=false -no-color -out=tfplan
 
-      - name: Comment plan on PR
-        uses: actions/github-script@v7
+          plan_sha256="$(sha256sum tfplan | awk '{print $1}')"
+          echo "sha256=$plan_sha256" >> "$GITHUB_OUTPUT"
+
+          jq -n \
+            --arg kind "apply" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit_sha "$GITHUB_SHA" \
+            --arg workflow_run_id "$GITHUB_RUN_ID" \
+            --arg plan_sha256 "$plan_sha256" \
+            '{kind: $kind, repository: $repository, commit_sha: $commit_sha, workflow_run_id: $workflow_run_id, plan_sha256: $plan_sha256}' \
+            > plan-manifest.json
+
+          terraform show -json tfplan \
+            | jq -r '.resource_changes[] | select(.change.actions != ["no-op"]) | "\(.change.actions | join(",")) \(.address)"' \
+            > changed-resources.txt
+
+          {
+            echo "Commit: $GITHUB_SHA"
+            echo "SHA-256: $plan_sha256"
+            echo "Changed resources:"
+            if [[ -s changed-resources.txt ]]; then
+              sed 's/^/- /' changed-resources.txt
+            else
+              echo "- none"
+            fi
+          } > plan-summary.txt
+          cat plan-summary.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload immutable saved-plan artifact
+        uses: actions/upload-artifact@v4
         with:
-          script: |
-            const fs = require('fs');
-            const plan = fs.readFileSync('terraform/envs/lab/plan.txt', 'utf8');
-            const body = `### Terraform plan\n\`\`\`\n${plan.slice(0, 60000)}\n\`\`\``;
-            github.rest.issues.createComment({
-              ...context.repo,
-              issue_number: context.issue.number,
-              body
-            });
+          name: terraform-plan-${{ github.sha }}
+          path: |
+            terraform/envs/lab/tfplan
+            terraform/envs/lab/plan-manifest.json
+            terraform/envs/lab/plan-summary.txt
+          if-no-files-found: error
+          retention-days: 3

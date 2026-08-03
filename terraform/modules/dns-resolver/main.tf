@@ -52,6 +52,37 @@ resource "azurerm_subnet" "resolver_outbound" {
   }
 }
 
+# Queries from the laptop/on-premises side arrive through the hub NVA. Azure's
+# system routes do not know that those source prefixes live behind that NVA, so
+# the inbound endpoint subnet needs an explicit symmetric return path.
+resource "azurerm_route_table" "resolver_inbound" {
+  count               = var.enabled ? 1 : 0
+  name                = "rt-resolver-inbound"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  tags                = var.tags
+
+  route {
+    name                   = "onprem-via-hub-nva"
+    address_prefix         = var.onprem_address_space
+    next_hop_type          = "VirtualAppliance"
+    next_hop_in_ip_address = var.hub_nva_ip
+  }
+
+  route {
+    name                   = "wireguard-via-hub-nva"
+    address_prefix         = var.wg_transfer_cidr
+    next_hop_type          = "VirtualAppliance"
+    next_hop_in_ip_address = var.hub_nva_ip
+  }
+}
+
+resource "azurerm_subnet_route_table_association" "resolver_inbound" {
+  count          = var.enabled ? 1 : 0
+  subnet_id      = azurerm_subnet.resolver_inbound[0].id
+  route_table_id = azurerm_route_table.resolver_inbound[0].id
+}
+
 resource "azurerm_private_dns_resolver" "resolver" {
   count               = var.enabled ? 1 : 0
   name                = "dnspr-hub"
@@ -71,6 +102,8 @@ resource "azurerm_private_dns_resolver_inbound_endpoint" "inbound" {
   ip_configurations {
     subnet_id = azurerm_subnet.resolver_inbound[0].id
   }
+
+  depends_on = [azurerm_subnet_route_table_association.resolver_inbound]
 }
 
 resource "azurerm_private_dns_resolver_outbound_endpoint" "outbound" {
@@ -89,6 +122,16 @@ resource "azurerm_private_dns_resolver_dns_forwarding_ruleset" "ruleset" {
   resource_group_name                        = var.resource_group_name
   private_dns_resolver_outbound_endpoint_ids = [azurerm_private_dns_resolver_outbound_endpoint.outbound[0].id]
   tags                                       = var.tags
+}
+
+# A forwarding ruleset does not affect queries until it is linked to each
+# querying VNet. Keep all links behind the same cost gate as the endpoints.
+resource "azurerm_private_dns_resolver_virtual_network_link" "links" {
+  for_each = var.enabled ? var.forwarding_vnet_links : {}
+
+  name                      = "link-${each.key}"
+  dns_forwarding_ruleset_id = azurerm_private_dns_resolver_dns_forwarding_ruleset.ruleset[0].id
+  virtual_network_id        = each.value
 }
 
 resource "azurerm_private_dns_resolver_forwarding_rule" "lab" {

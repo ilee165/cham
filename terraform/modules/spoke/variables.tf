@@ -67,6 +67,17 @@ variable "enable_test_vm" {
   description = "Create one temporary private verification VM in this spoke."
   type        = bool
   default     = false
+
+  validation {
+    condition     = !var.enable_test_vm || var.enable_test_nic != false
+    error_message = "enable_test_nic cannot be false while enable_test_vm is true."
+  }
+}
+
+variable "enable_test_nic" {
+  description = "Optional NIC lifecycle override for partially applied test workloads. Null follows enable_test_vm; true with enable_test_vm=false preserves a NIC whose VM was quota-blocked."
+  type        = bool
+  default     = null
 }
 
 variable "test_vm_subnet_key" {

@@ -13,6 +13,26 @@ variable "resource_group_name" { type = string }
 variable "hub_vnet_id" { type = string }
 variable "hub_vnet_name" { type = string }
 
+variable "hub_nva_ip" {
+  description = "Hub NVA private IP used as the next hop for resolver replies to WireGuard and on-premises clients."
+  type        = string
+}
+
+variable "onprem_address_space" {
+  description = "On-premises source prefix whose resolver replies must return through the hub NVA."
+  type        = string
+}
+
+variable "wg_transfer_cidr" {
+  description = "WireGuard transfer prefix whose resolver replies must return through the hub NVA."
+  type        = string
+}
+
+variable "forwarding_vnet_links" {
+  description = "Virtual networks whose Azure DNS queries should be subject to this resolver's forwarding rules."
+  type        = map(string)
+}
+
 variable "inbound_subnet_cidr" {
   type    = string
   default = "10.10.2.0/28"

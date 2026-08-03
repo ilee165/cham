@@ -4,8 +4,8 @@ fixed_at: 2026-08-03T16:10:42Z
 review_path: docs/evidence/phase2/02-REVIEW.md
 iteration: 1
 findings_in_scope: 18
-fixed: 15
-skipped: 3
+fixed: 16
+skipped: 2
 status: partial
 ---
 
@@ -17,29 +17,41 @@ status: partial
 
 **Summary:**
 - Findings in scope: 18 (0 critical, 6 warning, 12 info; fix_scope: all)
-- Fixed: 15 (WR-01..WR-06 in the earlier critical+warning pass; IN-02, IN-03,
-  IN-04, IN-05, IN-08, IN-09, IN-10, IN-11, IN-12 in this pass)
-- Skipped: 3 (IN-01, IN-06, IN-07 — each changes deployed-resource behavior
-  the operator must own; details and ready-to-apply guidance below)
+- Fixed: 16 (WR-01..WR-06; IN-02, IN-03, IN-04, IN-05, IN-07, IN-08,
+  IN-09, IN-10, IN-11, IN-12)
+- Skipped: 2 (IN-01 and IN-06 — each changes deployed-resource behavior the
+  operator must own; details and ready-to-apply guidance below)
+- Post-review safety corrections also supersede the pre-review recovery plan,
+  replace automatic CI apply/destroy with exact saved-plan gates, and complete
+  the flag-gated DNS Private Resolver link/NSG path.
 
 Both passes ran in isolated git worktrees on temporary branches,
 fast-forwarded onto `feat/plan-and-verify-phase-2` after verification. No
 terraform plan/apply/destroy/state/import and no az mutations were run; state,
 backends, tfvars, and `*.tfplan` files were never touched.
 
-## Expected plan impact — the operator's checklist
+## Required state-backed plan review — the operator's checklist
 
-With default-matching tfvars, the next saved plan should show EXACTLY one
-changed resource, `module.hub.azurerm_network_security_group.hub`, updated
-in-place, containing both:
+No source-only review can promise an exact resource count. The documented
+35-resource state contains the app VM and both NICs but no management VM, so a
+safe plan must explicitly set app VM/NIC `true`, management NIC `true`, and
+management VM `false` before planning. The deprecated shared `enable_test_vm`
+flag cannot represent that state.
 
-1. **WR-01** — two ADDED rules: `AllowOutboundForwardedToSpokes` (Outbound
+Against those state-aligned values, the code-relative NSG delta expected from
+the original review fixes is:
+
+1. **WR-01** — two added rules: `AllowOutboundForwardedToSpokes` (Outbound
    130) and `AllowWgTransferTransitFromSpokes` (Inbound 135).
-2. **IN-10** — three CHANGED destinations: `AllowWireGuardFromHome`,
-   `AllowSSHFromHome`, `AllowDNSFromRFC1918` go from `"*"` to `10.10.0.10`.
+2. **IN-10** — three changed destinations: `AllowWireGuardFromHome`,
+   `AllowSSHFromHome`, and `AllowDNSFromRFC1918` go from `"*"` to the hub VM.
 
-Anything else in the plan is NOT from these fixes and needs its own
-explanation. Every other applied fix is render-neutral (no plan diff), with
+That is a review hint, not a plan assertion. Refresh the remote state, generate
+a fresh saved plan from current `HEAD`, inspect every create/update/destroy,
+confirm `enable_private_resolver = false`, and obtain a new SHA-256 approval.
+Any pre-review Checkpoint C plan is superseded and must never be applied.
+
+Other applied fixes are render-neutral under the documented defaults, with
 two tfvars-dependent caveats:
 
 - **WR-06 / custom_data:** render is byte-identical under default
@@ -271,20 +283,30 @@ fails on the single point of failure for all spoke DNS and egress.
 
 ### IN-07: One `enable_test_vm` flag drives both spokes — quota-blocked partial applies cannot converge
 
-**File:** `terraform/envs/lab/variables.tf:71-75`; `terraform/envs/lab/main.tf` (spoke blocks)
-**Reason:** skipped per fix policy — restructuring the flag interacts directly
-with live partial state (app test VM exists; mgmt test VM is quota-blocked).
-Splitting the flag changes which live resources the next plan keeps, creates,
-or destroys, and the correct rollout (e.g., `enable_test_vm_app = true`,
-`enable_test_vm_mgmt = false` to match reality) requires the operator to
-assert what the live state should be. Suggested shape when ready: per-spoke
-booleans (or one `map(bool)`) passed as `enable_test_vm` to each spoke
-instance, with tfvars set to mirror the currently-deployed VMs before the
-first plan.
-**Original issue:** no way to express "app only"; every apply with the shared
-flag retries the quota-blocked VM.
+**Files modified:** `terraform/envs/lab/variables.tf`,
+`terraform/envs/lab/main.tf`, `terraform/envs/lab/terraform.tfvars.example`
+**Post-review fix:** added nullable per-spoke VM and NIC overrides and passed
+their resolved values to the two spoke instances independently. The spoke
+module can now retain a NIC even when its VM is disabled, which represents the
+quota-blocked partial apply. The old shared flag remains only as a compatibility
+fallback for existing gitignored tfvars. Every new state-backed plan must set
+all four values explicitly; the documented partial state is represented by app
+VM/NIC `true`, management NIC `true`, and management VM `false`.
+**Plan safety:** this code change does not authorize a plan or apply. The first
+fresh plan must prove the app VM and both existing NICs are retained, the
+management VM is not retried, and no unrelated destroy or replacement is
+present.
 
 ## Verification performed
+
+### Post-review correction verification
+
+The approved follow-up corrections are recorded in
+`docs/evidence/phase2/02-POST-REVIEW-CORRECTIONS.md`. Fresh static validation
+passes, and a state-backed verification plan using the four explicit
+partial-state flags reports 0 create, 1 hub-NSG update, 0 delete, and 0
+replacement with the resolver disabled. The artifact is verification-only and
+not approved because it was generated before committing these corrections.
 
 - **Tier 1:** every edit applied via exact-match Edit semantics; worktree
   confirmed clean (`git status --porcelain` empty) after each commit; final

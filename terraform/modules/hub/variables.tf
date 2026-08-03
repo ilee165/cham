@@ -92,6 +92,25 @@ variable "wg_transfer_cidr" {
   }
 }
 
+variable "enable_private_resolver" {
+  description = "Whether the cost-gated DNS Private Resolver is enabled. Controls only the matching tunnel-to-inbound-endpoint NSG rule in this module."
+  type        = bool
+  default     = false
+}
+
+variable "resolver_inbound_subnet_cidr" {
+  description = "Dedicated DNS Private Resolver inbound subnet permitted as a tunnel-originated DNS destination only when enable_private_resolver is true."
+  type        = string
+
+  validation {
+    condition = (
+      can(cidrhost(var.resolver_inbound_subnet_cidr, 0)) &&
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.resolver_inbound_subnet_cidr))
+    )
+    error_message = "resolver_inbound_subnet_cidr must be a valid IPv4 CIDR such as 10.10.2.0/28."
+  }
+}
+
 variable "lab_zone" {
   description = "On-prem forward zone, e.g. lab.dwsolution.co"
   type        = string

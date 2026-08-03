@@ -47,7 +47,7 @@ Phase 2 excludes:
 
 - No apply or destroy without a fresh saved plan and explicit user approval.
 - enable_private_resolver remains false in every Phase 2 plan.
-- enable_test_vm defaults false and is enabled only for the approved verification window.
+- Per-spoke test VM/NIC overrides default to false (or inherit the deprecated false shared flag) and are enabled only for the approved verification window. State-backed plans set all four explicitly.
 - home_ip must validate as one IPv4 /32; never use 0.0.0.0/0.
 - No private key, tfvars, backend config, plan, state, credential, tenant/subscription ID, home IP, or personal email is committed as evidence.
 - Azure budgets are notifications, not spend caps.
@@ -526,7 +526,7 @@ icacls $keyDir /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F"
 
 The icacls command restricts the directory to the current user. The private key never enters tfvars/state.
 
-Populate terraform.tfvars with subscription ID, approved home /32, SSH public key, WireGuard public key, alert email, current-month budget start date, enable_private_resolver = false, and enable_test_vm = false.
+Populate terraform.tfvars with subscription ID, approved home /32, SSH public key, WireGuard public key, alert email, current-month budget start date, `enable_private_resolver = false`, and all four per-spoke VM/NIC flags false. Do not use the deprecated shared test-VM flag for new configuration.
 
 ~~~powershell
 git check-ignore -v terraform/envs/lab/terraform.tfvars
@@ -613,7 +613,7 @@ If base verification fails, stop. Do not enable test VMs until diagnosed and rep
 
 ## Task 7 — Saved verification-workload plan
 
-Set enable_test_vm = true locally:
+For a full two-VM verification window, set app VM/NIC and management VM/NIC flags true locally. If state is partial, set each flag to mirror the resources already tracked before planning:
 
 ~~~powershell
 terraform -chdir=terraform/envs/lab plan -out=testvm.tfplan
@@ -628,7 +628,7 @@ Expected delta: one private NIC and Standard_D2als_v6 VM per spoke, no public IP
 
 Present saved-plan hash/delta, current incremental cost, timebox, no-public-IP confirmation, negative tests, and rollback. No apply without approval.
 
-**Execution status — recovery blocked by quota offer:** The exact four-create plan was approved and partially applied on 2026-08-03. Both NICs and the app VM succeeded; the management VM failed because Total Regional Cores reached 4 of 4. App SSH, routes, hub DNS, seed resolution, and auto-registration passed. Internet egress failed because the Standard public-IP NVA path lacked an explicit forwarded-traffic NSG allow. Both running VMs were deallocated. A corrected saved recovery plan contains one management-VM create, one in-place hub NSG update adding narrowly scoped Internet/on-premises transit rules, and zero destroys. The user explicitly approved requesting Total Regional Cores from 4 to 6 and conditionally applying that exact plan, but Azure returned terminal `Failed` state with `ResourceNotAvailableForOffer`; the effective limit remains 4 of 4, so nothing was applied or started. See `docs/evidence/phase2/checkpoint-c-recovery.md`; do not apply recovery, start VMs, or destroy without a new explicit approval.
+**Execution status — recovery blocked by quota offer:** The exact four-create plan was approved and partially applied on 2026-08-03. Both NICs and the app VM succeeded; the management VM failed because Total Regional Cores reached 4 of 4. App SSH, routes, hub DNS, seed resolution, and auto-registration passed. Internet egress failed because the Standard public-IP NVA path lacked an explicit forwarded-traffic NSG allow. Both running VMs were deallocated. The user explicitly approved requesting Total Regional Cores from 4 to 6 and conditionally applying the then-current recovery plan, but Azure returned terminal `Failed` state with `ResourceNotAvailableForOffer`; the effective limit remains 4 of 4, so nothing was applied or started. That pre-review recovery artifact is now **superseded** and must never be applied: later source fixes changed its embedded NSG configuration and split the per-spoke test-VM desired state. See `docs/evidence/phase2/checkpoint-c-recovery.md`; any future mutation requires a fresh state-backed saved plan from current `HEAD`, complete delta/hash review, and new explicit approval.
 
 ---
 
@@ -693,7 +693,7 @@ az group exists --name rg-cham-tfstate
 
 Expected: lab false, backend true, and no Phase 2 compute/network/DNS/budget resource remains. Persistent state storage may still cost money.
 
-Reset enable_test_vm = false. Generate but do not apply:
+Reset all four per-spoke VM/NIC flags false. Generate but do not apply:
 
 ~~~powershell
 terraform -chdir=terraform/envs/lab plan -out=recreate.tfplan

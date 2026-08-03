@@ -13,6 +13,24 @@ locals {
     app  = "10.10.4.0/22"
     mgmt = "10.10.8.0/22"
   }
+
+  # Keep resolver addressing single-sourced because the hub NSG must permit
+  # tunnel-originated DNS traffic to the same inbound subnet the managed
+  # resolver uses when the cost-gated feature is enabled.
+  resolver_inbound_subnet_cidr  = "10.10.2.0/28"
+  resolver_outbound_subnet_cidr = "10.10.2.16/28"
+
+  # Per-spoke overrides can represent the quota-blocked app-only live state.
+  # The legacy shared flag remains a compatibility fallback for existing
+  # gitignored tfvars and must not be used for new configuration.
+  test_vm_enabled = {
+    app  = var.enable_test_vm_app != null ? var.enable_test_vm_app : var.enable_test_vm
+    mgmt = var.enable_test_vm_mgmt != null ? var.enable_test_vm_mgmt : var.enable_test_vm
+  }
+  test_nic_enabled = {
+    app  = var.enable_test_nic_app != null ? var.enable_test_nic_app : local.test_vm_enabled.app
+    mgmt = var.enable_test_nic_mgmt != null ? var.enable_test_nic_mgmt : local.test_vm_enabled.mgmt
+  }
 }
 
 resource "azurerm_resource_group" "lab" {
@@ -22,19 +40,21 @@ resource "azurerm_resource_group" "lab" {
 }
 
 module "hub" {
-  source               = "../../modules/hub"
-  location             = var.location
-  vm_size              = var.vm_size
-  resource_group_name  = azurerm_resource_group.lab.name
-  home_ip              = var.home_ip
-  ssh_public_key       = var.ssh_public_key
-  lab_zone             = var.lab_zone
-  onprem_dns_ip        = var.onprem_dns_ip
-  onprem_address_space = var.onprem_address_space
-  spoke_address_spaces = values(local.spoke_cidrs)
-  wg_transfer_cidr     = var.wg_transfer_cidr
-  wg_peer_public_key   = var.wg_peer_public_key
-  tags                 = local.tags
+  source                       = "../../modules/hub"
+  location                     = var.location
+  vm_size                      = var.vm_size
+  resource_group_name          = azurerm_resource_group.lab.name
+  home_ip                      = var.home_ip
+  ssh_public_key               = var.ssh_public_key
+  lab_zone                     = var.lab_zone
+  onprem_dns_ip                = var.onprem_dns_ip
+  onprem_address_space         = var.onprem_address_space
+  spoke_address_spaces         = values(local.spoke_cidrs)
+  wg_transfer_cidr             = var.wg_transfer_cidr
+  enable_private_resolver      = var.enable_private_resolver
+  resolver_inbound_subnet_cidr = local.resolver_inbound_subnet_cidr
+  wg_peer_public_key           = var.wg_peer_public_key
+  tags                         = local.tags
 }
 
 # Same module, two instantiations — the reusability story.
@@ -53,7 +73,8 @@ module "spoke_app" {
   hub_nva_ip           = module.hub.vm_private_ip
   onprem_address_space = var.onprem_address_space
   wg_transfer_cidr     = var.wg_transfer_cidr
-  enable_test_vm       = var.enable_test_vm
+  enable_test_vm       = local.test_vm_enabled.app
+  enable_test_nic      = local.test_nic_enabled.app
   ssh_public_key       = var.ssh_public_key
   tags                 = local.tags
 }
@@ -73,9 +94,15 @@ module "spoke_mgmt" {
   hub_nva_ip           = module.hub.vm_private_ip
   onprem_address_space = var.onprem_address_space
   wg_transfer_cidr     = var.wg_transfer_cidr
-  enable_test_vm       = var.enable_test_vm
+  enable_test_vm       = local.test_vm_enabled.mgmt
+  enable_test_nic      = local.test_nic_enabled.mgmt
   ssh_public_key       = var.ssh_public_key
   tags                 = local.tags
+
+  # The live recovery state already has a two-vCPU app VM. Complete its
+  # one-vCPU resize before Azure evaluates the management VM create so Total
+  # Regional Cores never transiently exceeds the subscription's limit of four.
+  depends_on = [module.spoke_app]
 }
 
 module "private_dns" {
@@ -96,15 +123,25 @@ module "private_dns" {
 
 # FLAG-GATED — see modules/dns-resolver/main.tf cost warning
 module "dns_resolver" {
-  source              = "../../modules/dns-resolver"
-  enabled             = var.enable_private_resolver
-  location            = var.location
-  resource_group_name = azurerm_resource_group.lab.name
-  hub_vnet_id         = module.hub.vnet_id
-  hub_vnet_name       = module.hub.vnet_name
-  lab_zone            = var.lab_zone
-  hub_dns_ip          = module.hub.vm_private_ip
-  tags                = local.tags
+  source               = "../../modules/dns-resolver"
+  enabled              = var.enable_private_resolver
+  location             = var.location
+  resource_group_name  = azurerm_resource_group.lab.name
+  hub_vnet_id          = module.hub.vnet_id
+  hub_vnet_name        = module.hub.vnet_name
+  hub_nva_ip           = module.hub.vm_private_ip
+  onprem_address_space = var.onprem_address_space
+  wg_transfer_cidr     = var.wg_transfer_cidr
+  inbound_subnet_cidr  = local.resolver_inbound_subnet_cidr
+  outbound_subnet_cidr = local.resolver_outbound_subnet_cidr
+  forwarding_vnet_links = {
+    hub  = module.hub.vnet_id
+    app  = module.spoke_app.vnet_id
+    mgmt = module.spoke_mgmt.vnet_id
+  }
+  lab_zone   = var.lab_zone
+  hub_dns_ip = module.hub.vm_private_ip
+  tags       = local.tags
 }
 
 # Budget alert — notification only. Azure has NO automatic spend cap.

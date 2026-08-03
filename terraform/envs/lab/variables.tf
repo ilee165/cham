@@ -10,9 +10,9 @@ variable "vm_size" {
 }
 
 variable "test_vm_size" {
-  description = "VM SKU for temporary private verification VMs."
+  description = "VM SKU for temporary private verification VMs. One vCPU keeps the paired topology within the lab's four-core regional quota."
   type        = string
-  default     = "Standard_D2als_v6"
+  default     = "Standard_B1ms"
 }
 
 variable "subscription_id" { type = string }
@@ -101,9 +101,43 @@ variable "enable_private_resolver" {
 }
 
 variable "enable_test_vm" {
-  description = "Create temporary private verification VMs in both spokes."
+  description = "Deprecated compatibility flag that creates both temporary test VMs. Prefer the per-spoke overrides so partial or quota-limited state can be represented safely."
   type        = bool
   default     = false
+
+  validation {
+    condition = !var.enable_test_vm || alltrue([
+      var.enable_test_vm_app != null,
+      var.enable_test_vm_mgmt != null,
+      var.enable_test_nic_app != null,
+      var.enable_test_nic_mgmt != null,
+    ])
+    error_message = "The deprecated enable_test_vm=true setting is ambiguous. Set all four per-spoke VM/NIC overrides explicitly before planning."
+  }
+}
+
+variable "enable_test_vm_app" {
+  description = "Optional app-spoke override. Null inherits deprecated enable_test_vm; set explicitly for any state-backed plan."
+  type        = bool
+  default     = null
+}
+
+variable "enable_test_vm_mgmt" {
+  description = "Optional management-spoke override. Null inherits deprecated enable_test_vm; set explicitly for any state-backed plan."
+  type        = bool
+  default     = null
+}
+
+variable "enable_test_nic_app" {
+  description = "Optional app test-NIC override. Null follows the resolved app VM flag. Set explicitly for a partial-state plan."
+  type        = bool
+  default     = null
+}
+
+variable "enable_test_nic_mgmt" {
+  description = "Optional management test-NIC override. Null follows the resolved management VM flag. Set true with enable_test_vm_mgmt=false to preserve a quota-blocked NIC."
+  type        = bool
+  default     = null
 }
 
 variable "alert_email" { type = string }

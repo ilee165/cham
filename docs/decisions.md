@@ -12,8 +12,9 @@ interview material as much as documentation.
   subscription availability, but no free-service entitlement is assumed.
 - **Tradeoff accepted:** we own patching, HA (none — single VM), and zone
   redundancy that the managed service would provide. Right call at lab
-  scale; at production scale the calculus reverses and the flag flip is
-  the migration.
+  scale. The flag provisions a testable managed resolver path, but the current
+  spokes keep using custom DNS on the hub VM; a production cutover must also
+  move clients to Azure-provided DNS (or otherwise redirect their DNS path).
 
 ## ADR-002: WireGuard instead of Azure VPN Gateway
 - **Context:** Site-to-site tunnel laptop↔Azure. VPN Gateway Basic ~$29/mo,

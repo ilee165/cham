@@ -128,7 +128,7 @@ Microsoft requires Azure NIC IP forwarding, guest OS IP forwarding, and proxy/NA
 
 Without a workload NIC, the plan cannot prove effective routes, custom DNS, auto-registration, egress, or spoke isolation. The proposed flag-gated, no-public-IP test VMs are justified.
 
-**Correction:** Keep `enable_test_vm = false` by default. Apply and verify the base stack first, then require a separate approval for a short test-VM session. Do not describe the VMs, disks, state storage, or public IP as universally free; eligibility and pricing depend on the subscription and current rates.
+**Correction:** Keep every per-spoke test VM/NIC flag false by default. Apply and verify the base stack first, then require a separate saved-plan approval for a short test-VM session. Set all four explicitly when state is partial. Do not describe the VMs, disks, state storage, or public IP as universally free; eligibility and pricing depend on the subscription and current rates.
 
 ### IMPORTANT 5 — Static validation and lock files must precede every plan
 

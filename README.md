@@ -36,8 +36,12 @@ B2ats v2 VM in North Central US and is intended to be applied for a bounded
 verification session, then destroyed the same day. Free-account benefits are
 not assumed. Azure DNS Private Resolver (~$360/mo both endpoints) is
 `count`-gated behind `enable_private_resolver` and used only in explicitly
-approved prorated sessions. `destroy.yml` is the kill switch — an Azure budget
-notification is not a spend cap.
+approved prorated sessions. CI never applies on merge: pull requests run only
+credential-free static checks, while a manual `plan.yml` run on `main`
+publishes a short-lived saved-plan artifact. `apply.yml` requires its exact
+commit, run ID, SHA-256, and a protected `lab` environment. `destroy.yml` uses
+the same two-stage saved-plan gate. An Azure budget notification is not a
+spend cap.
 
 See [docs/decisions.md](docs/decisions.md) for why each of those calls
 was made. Start with ADR-001.
