@@ -215,8 +215,12 @@ resource "azurerm_linux_virtual_machine" "hub" {
   }
 
   custom_data = base64encode(templatefile("${path.module}/cloud-init.yml.tpl", {
-    onprem_cidr        = var.onprem_address_space
-    wg_transfer_cidr   = var.wg_transfer_cidr
+    onprem_cidr      = var.onprem_address_space
+    wg_transfer_cidr = var.wg_transfer_cidr
+    # WG interface address derived from wg_transfer_cidr (host .1, same mask)
+    # so the tunnel follows the variable instead of a hardcoded 172.16.0.1/24.
+    # Renders identically to the old literal under the default CIDR.
+    wg_interface_cidr  = "${cidrhost(var.wg_transfer_cidr, 1)}/${split("/", var.wg_transfer_cidr)[1]}"
     lab_zone           = var.lab_zone
     onprem_dns_ip      = var.onprem_dns_ip # laptop BIND9 via tunnel
     wg_peer_public_key = var.wg_peer_public_key

@@ -19,13 +19,13 @@ write_files:
       [Interface]
       # Generate on first boot: wg genkey — do NOT commit real keys
       PrivateKey = REPLACE_ON_HOST
-      Address = 172.16.0.1/24
+      Address = ${wg_interface_cidr}
       ListenPort = 51820
 
       [Peer]
       # Laptop
       PublicKey = ${wg_peer_public_key}
-      AllowedIPs = 172.16.0.2/32, ${onprem_cidr}
+      AllowedIPs = ${onprem_dns_ip}/32, ${onprem_cidr}
 
   - path: /etc/bind/named.conf.options
     content: |
