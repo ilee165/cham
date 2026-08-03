@@ -100,6 +100,21 @@ resource "azurerm_network_security_group" "hub" {
     destination_address_prefix = "Internet"
   }
 
+  # Explicit allow for spoke -> wg-transfer flows. Without it the return leg
+  # of spoke->172.16.x traffic relies on RFC1918 space matching the "Internet"
+  # service tag in rule 130, which is undocumented behavior.
+  security_rule {
+    name                       = "AllowWgTransferTransitFromSpokes"
+    priority                   = 135
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefixes    = var.spoke_address_spaces
+    destination_address_prefix = var.wg_transfer_cidr
+  }
+
   security_rule {
     name                       = "AllowOnPremTransitFromSpokes"
     priority                   = 140
@@ -122,6 +137,23 @@ resource "azurerm_network_security_group" "hub" {
     destination_port_range     = "*"
     source_address_prefix      = "*"
     destination_address_prefix = "*"
+  }
+
+  # Outbound leg of tunnel-initiated flows (laptop/on-prem -> spoke): after
+  # wg0 decapsulation the packet leaves this NIC as a NEW outbound flow whose
+  # source (on-prem / wg-transfer space) is outside the VNet, so the default
+  # AllowVnetOutBound never matches and DenyAllOutBound (65500) would drop it.
+  # Mirrors the inbound transit intent of rules 130/140.
+  security_rule {
+    name                         = "AllowOutboundForwardedToSpokes"
+    priority                     = 130
+    direction                    = "Outbound"
+    access                       = "Allow"
+    protocol                     = "*"
+    source_port_range            = "*"
+    destination_port_range       = "*"
+    source_address_prefixes      = [var.onprem_address_space, var.wg_transfer_cidr]
+    destination_address_prefixes = var.spoke_address_spaces
   }
 }
 
