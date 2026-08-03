@@ -5,8 +5,8 @@ variable "enabled" {
 }
 
 variable "location" {
-  type    = string
-  default = "eastus"
+  description = "Azure region. No default on purpose: callers must pass the lab region explicitly, otherwise an omitted argument silently splits the deployment across regions."
+  type        = string
 }
 
 variable "resource_group_name" { type = string }

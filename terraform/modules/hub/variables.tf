@@ -1,6 +1,6 @@
 variable "location" {
-  type    = string
-  default = "eastus"
+  description = "Azure region. No default on purpose: callers must pass the lab region explicitly, otherwise an omitted argument silently splits the deployment across regions (peering still works, so it fails as quota/latency/cost, not loudly)."
+  type        = string
 }
 
 variable "vm_size" {
