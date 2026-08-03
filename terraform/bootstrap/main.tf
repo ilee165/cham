@@ -17,6 +17,16 @@ terraform {
   }
 }
 
+# resource_provider_registrations = "none" disables automatic RP registration,
+# so a FRESH subscription must pre-register what bootstrap touches or the
+# first apply fails midway with MissingSubscriptionRegistration errors.
+# Required here:
+#   Microsoft.Storage       — state storage account/container
+#   Microsoft.Resources     — resource group (normally registered by default)
+#   Microsoft.Authorization — role assignment (normally registered by default)
+# One-time setup per subscription:
+#   for rp in Microsoft.Storage Microsoft.Resources Microsoft.Authorization; do
+#     az provider register --namespace "$rp"; done
 provider "azurerm" {
   subscription_id                 = var.subscription_id
   resource_provider_registrations = "none"
