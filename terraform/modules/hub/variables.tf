@@ -53,8 +53,8 @@ variable "admin_username" {
 variable "ssh_public_key" { type = string }
 
 variable "onprem_address_space" {
-  type    = string
-  default = "10.20.0.0/16"
+  description = "On-prem CIDR. No default on purpose: callers must wire the same value the spokes receive, or hub NSG rules and the cloud-init render silently diverge from the spoke view."
+  type        = string
 }
 
 variable "spoke_address_spaces" {

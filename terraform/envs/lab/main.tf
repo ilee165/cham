@@ -21,6 +21,7 @@ module "hub" {
   ssh_public_key       = var.ssh_public_key
   lab_zone             = var.lab_zone
   onprem_dns_ip        = var.onprem_dns_ip
+  onprem_address_space = var.onprem_address_space
   spoke_address_spaces = ["10.10.4.0/22", "10.10.8.0/22"]
   wg_transfer_cidr     = var.wg_transfer_cidr
   wg_peer_public_key   = var.wg_peer_public_key
