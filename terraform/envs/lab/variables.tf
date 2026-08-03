@@ -1,18 +1,18 @@
 variable "location" {
   type    = string
-  default = "northcentralus"
+  default = "eastus2"
 }
 
 variable "vm_size" {
-  description = "VM SKU for the hub appliance."
+  description = "VM SKU for the hub appliance. v7 AMD sizes are NVMe-boot-only; the VM resources set disk_controller_type accordingly."
   type        = string
-  default     = "Standard_B2ats_v2"
+  default     = "Standard_D2als_v7"
 }
 
 variable "test_vm_size" {
   description = "VM SKU for temporary private verification VMs. One vCPU keeps the paired topology within the lab's four-core regional quota."
   type        = string
-  default     = "Standard_B1ms"
+  default     = "Standard_F1als_v7"
 }
 
 variable "subscription_id" { type = string }

@@ -6,7 +6,7 @@ variable "location" {
 variable "vm_size" {
   description = "Azure VM SKU for the hub BIND9/WireGuard appliance."
   type        = string
-  default     = "Standard_B2ats_v2"
+  default     = "Standard_D2als_v7"
 }
 
 variable "resource_group_name" { type = string }

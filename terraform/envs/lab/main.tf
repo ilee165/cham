@@ -99,9 +99,9 @@ module "spoke_mgmt" {
   ssh_public_key       = var.ssh_public_key
   tags                 = local.tags
 
-  # The live recovery state already has a two-vCPU app VM. Complete its
-  # one-vCPU resize before Azure evaluates the management VM create so Total
-  # Regional Cores never transiently exceeds the subscription's limit of four.
+  # Sequence the spoke creates so regional-core evaluation is deterministic:
+  # the app VM is committed before Azure evaluates the management VM, which
+  # keeps quota errors attributable to a single resource instead of a race.
   depends_on = [module.spoke_app]
 }
 

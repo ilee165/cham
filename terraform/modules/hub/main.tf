@@ -230,6 +230,10 @@ resource "azurerm_linux_virtual_machine" "hub" {
   network_interface_ids      = [azurerm_network_interface.hub.id]
   tags                       = var.tags
 
+  # The v7 AMD SKUs this lab can actually obtain expose an NVMe-only disk
+  # controller; omitting this makes Azure reject the create at apply time.
+  disk_controller_type = "NVMe"
+
   admin_ssh_key {
     username   = var.admin_username
     public_key = var.ssh_public_key
