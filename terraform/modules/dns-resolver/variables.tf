@@ -24,4 +24,8 @@ variable "outbound_subnet_cidr" {
 }
 
 variable "lab_zone" { type = string }
-variable "onprem_dns_ip" { type = string }
+
+variable "hub_dns_ip" {
+  description = "Hub BIND9 VM private IP — the in-VNet forwarding target that already relays the lab zone on-prem across the WireGuard tunnel. The laptop tunnel IP is NOT reachable from the resolver outbound subnet."
+  type        = string
+}

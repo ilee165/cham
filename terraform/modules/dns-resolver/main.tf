@@ -94,8 +94,12 @@ resource "azurerm_private_dns_resolver_forwarding_rule" "lab" {
   domain_name               = "${var.lab_zone}." # trailing dot required
   enabled                   = true
 
+  # Target the hub BIND9 VM: reachable in-VNet from the outbound endpoint and
+  # already forwarding the lab zone across the tunnel. Targeting the laptop
+  # tunnel IP directly cannot work — snet-resolver-out has no route to the
+  # WireGuard transfer network, so those queries would be silently dropped.
   target_dns_servers {
-    ip_address = var.onprem_dns_ip
+    ip_address = var.hub_dns_ip
     port       = 53
   }
 }
