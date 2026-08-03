@@ -4,6 +4,15 @@ locals {
     managed = "terraform"
     env     = "lab"
   }
+
+  # Single source of truth for spoke CIDRs — consumed by the hub NSG transit
+  # allow-list AND each spoke's address_space so they cannot drift. Editing a
+  # spoke CIDR in only one place used to cause a silent full-egress outage
+  # for that spoke (hub DenyAllOtherInbound). Note: values() sorts by key.
+  spoke_cidrs = {
+    app  = "10.10.4.0/22"
+    mgmt = "10.10.8.0/22"
+  }
 }
 
 resource "azurerm_resource_group" "lab" {
@@ -22,7 +31,7 @@ module "hub" {
   lab_zone             = var.lab_zone
   onprem_dns_ip        = var.onprem_dns_ip
   onprem_address_space = var.onprem_address_space
-  spoke_address_spaces = ["10.10.4.0/22", "10.10.8.0/22"]
+  spoke_address_spaces = values(local.spoke_cidrs)
   wg_transfer_cidr     = var.wg_transfer_cidr
   wg_peer_public_key   = var.wg_peer_public_key
   tags                 = local.tags
@@ -35,7 +44,7 @@ module "spoke_app" {
   location             = var.location
   vm_size              = var.test_vm_size
   resource_group_name  = azurerm_resource_group.lab.name
-  address_space        = "10.10.4.0/22"
+  address_space        = local.spoke_cidrs.app
   subnets              = { workload = "10.10.4.0/24" }
   dns_servers          = [module.hub.vm_private_ip]
   hub_vnet_id          = module.hub.vnet_id
@@ -55,7 +64,7 @@ module "spoke_mgmt" {
   location             = var.location
   vm_size              = var.test_vm_size
   resource_group_name  = azurerm_resource_group.lab.name
-  address_space        = "10.10.8.0/22"
+  address_space        = local.spoke_cidrs.mgmt
   subnets              = { tools = "10.10.8.0/24" }
   dns_servers          = [module.hub.vm_private_ip]
   hub_vnet_id          = module.hub.vnet_id
