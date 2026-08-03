@@ -13,14 +13,15 @@ resource "azurerm_network_interface" "testvm" {
 }
 
 resource "azurerm_linux_virtual_machine" "testvm" {
-  count                 = var.enable_test_vm ? 1 : 0
-  name                  = "vm-test-${var.name}"
-  location              = var.location
-  resource_group_name   = var.resource_group_name
-  size                  = var.vm_size
-  admin_username        = var.admin_username
-  network_interface_ids = [azurerm_network_interface.testvm[0].id]
-  tags                  = var.tags
+  count                      = var.enable_test_vm ? 1 : 0
+  name                       = "vm-test-${var.name}"
+  location                   = var.location
+  resource_group_name        = var.resource_group_name
+  size                       = var.vm_size
+  admin_username             = var.admin_username
+  allow_extension_operations = false
+  network_interface_ids      = [azurerm_network_interface.testvm[0].id]
+  tags                       = var.tags
 
   admin_ssh_key {
     username   = var.admin_username

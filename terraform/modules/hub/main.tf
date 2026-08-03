@@ -89,6 +89,30 @@ resource "azurerm_network_security_group" "hub" {
   }
 
   security_rule {
+    name                       = "AllowInternetTransitFromSpokes"
+    priority                   = 130
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefixes    = var.spoke_address_spaces
+    destination_address_prefix = "Internet"
+  }
+
+  security_rule {
+    name                       = "AllowOnPremTransitFromSpokes"
+    priority                   = 140
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefixes    = var.spoke_address_spaces
+    destination_address_prefix = var.onprem_address_space
+  }
+
+  security_rule {
     name                       = "DenyAllOtherInbound"
     priority                   = 4000
     direction                  = "Inbound"

@@ -5,5 +5,7 @@ ssh_public_key     = "ssh-ed25519 AAAA... you@laptop"
 wg_peer_public_key = "laptop-wireguard-public-key"
 alert_email        = "you@example.com"
 budget_start_date  = "2026-08-01T00:00:00Z"
+vm_size                 = "Standard_B2ats_v2" # hub appliance
+test_vm_size            = "Standard_D2als_v6" # temporary private verification VMs
 enable_private_resolver = false # keep disabled throughout Phase 2
 enable_test_vm          = false # enable only for an approved, timeboxed verification window

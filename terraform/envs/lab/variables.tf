@@ -4,9 +4,15 @@ variable "location" {
 }
 
 variable "vm_size" {
-  description = "VM SKU shared by the hub appliance and temporary spoke verification VMs."
+  description = "VM SKU for the hub appliance."
   type        = string
   default     = "Standard_B2ats_v2"
+}
+
+variable "test_vm_size" {
+  description = "VM SKU for temporary private verification VMs."
+  type        = string
+  default     = "Standard_D2als_v6"
 }
 
 variable "subscription_id" { type = string }

@@ -57,6 +57,11 @@ variable "onprem_address_space" {
   default = "10.20.0.0/16"
 }
 
+variable "spoke_address_spaces" {
+  description = "Spoke CIDRs permitted to transit the hub NVA toward Internet and on-premises destinations."
+  type        = list(string)
+}
+
 variable "wg_transfer_cidr" {
   description = "WireGuard transfer network allowed to query DNS and reach spoke workloads."
   type        = string

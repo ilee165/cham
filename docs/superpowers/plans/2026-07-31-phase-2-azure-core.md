@@ -552,14 +552,14 @@ Plan invariants:
 - The lab root initialized successfully against the Entra-authenticated Azure Blob backend. The remote lab state has zero managed resources, and no local root state exists.
 - The backend configuration, Terraform variables, and saved plan are gitignored and ACL-restricted to the active Windows user and SYSTEM. Dedicated SSH and WireGuard keypairs are stored outside the repository; only public keys enter Terraform inputs, and private key material is absent from the saved-plan JSON.
 - The original East US/B1s plan, SHA-256 `7795f39964499a48a8b60080fa1a7e7114205b35699b77f49778c16fe6d6619c`, was blocked before apply because Azure reported `Standard_B1s` as `NotAvailableForSubscription`. It remains ignored and ACL-protected as historical evidence; it is superseded and must not be applied.
-- After explicit approval, `vm_size` was parameterized across the lab, hub, and spoke modules; the lab root and protected local inputs now use North Central US and `Standard_B2ats_v2` for both hub and temporary verification VMs.
+- After explicit approval, VM sizing was separated by role: the hub remains `Standard_B2ats_v2`, while the temporary spoke verification VMs use `Standard_D2als_v6` through `test_vm_size`.
 - The revised saved plan was generated with Terraform 1.15.8 and locked AzureRM 4.81.0. Its SHA-256 is `4edde8bde9dddb3a534756f177380fbd69629dbdf6feb7082cf76204fde0bfd0` and it contains 32 creates, 0 changes, 0 destroys, and 0 warnings.
 - Revised planned resources comprise one subscription budget, one resource group, three VNets, four subnets, four peerings, three NSGs and their four subnet associations, two route tables and their two subnet associations, one Standard static public IP, one NIC, one Standard_B2ats_v2 Linux VM with a 30 GB Standard_LRS OS disk, one Private DNS zone and A record, and three Private DNS VNet links.
 - Both feature flags are false. The plan contains zero Private Resolver resources, zero test-workload resources, exactly one public IP, four peerings, three Private DNS links, two spokes using hub DNS, four routes using the hub NVA next hop, and one highest-priority all-source inbound deny.
 - The current North Central US public retail-rate baseline for an always-on deployment is approximately USD 12.55/month: B2ats v2 Linux compute, Standard static IPv4, S4 Standard HDD capacity, and one Private DNS zone. A conservative four-hour session estimate is USD 0.08. DNS queries/record sets, disk operations, peering and Internet transfer, taxes, and the existing state-storage footprint remain variable. No credit, free-tier, reservation, savings-plan, or negotiated discount is assumed.
 - A monthly USD 50 subscription budget with enabled 50% and 90% notifications is included in the plan.
 - `Microsoft.Consumption`, `Microsoft.Storage`, `Microsoft.Network`, and `Microsoft.Compute` are registered. Network and Compute registration was explicitly approved and completed before the original plan's SKU-readiness guard blocked its apply.
-- North Central US has a four-vCPU `standardBasv2Family` quota. The base hub consumes two vCPUs; two simultaneous B2ats v2 verification VMs would require six total. Azure accepted and then rejected the explicitly approved request for six with `ResourceNotAvailableForOffer`. Checkpoint C now requires explicit approval of a separate-family test SKU before its saved plan can be generated.
+- North Central US has a four-vCPU `standardBasv2Family` quota. The base hub consumes two vCPUs; two simultaneous B2ats v2 verification VMs would require six total. Azure accepted and then rejected the explicitly approved request for six with `ResourceNotAvailableForOffer`. The user subsequently approved `Standard_D2als_v6` from the separate `standardDalv6Family` for Checkpoint C preparation; after the partial apply, that family has 2 of 4 vCPUs in use and the absent management VM requires the remaining two. The independent Total Regional Cores limit remains exhausted at 4 of 4.
 - No lab resources were created while producing or reviewing this plan.
 
 ---
@@ -620,13 +620,15 @@ terraform -chdir=terraform/envs/lab plan -out=testvm.tfplan
 terraform -chdir=terraform/envs/lab show -no-color testvm.tfplan
 ~~~
 
-Expected delta: one private NIC and Standard_B2ats_v2 VM per spoke, no public IP, no unrelated change.
+Expected delta: one private NIC and Standard_D2als_v6 VM per spoke, no public IP, no unrelated change.
 
 ---
 
 ## Checkpoint C — Temporary verification workload
 
 Present saved-plan hash/delta, current incremental cost, timebox, no-public-IP confirmation, negative tests, and rollback. No apply without approval.
+
+**Execution status — recovery blocked by quota offer:** The exact four-create plan was approved and partially applied on 2026-08-03. Both NICs and the app VM succeeded; the management VM failed because Total Regional Cores reached 4 of 4. App SSH, routes, hub DNS, seed resolution, and auto-registration passed. Internet egress failed because the Standard public-IP NVA path lacked an explicit forwarded-traffic NSG allow. Both running VMs were deallocated. A corrected saved recovery plan contains one management-VM create, one in-place hub NSG update adding narrowly scoped Internet/on-premises transit rules, and zero destroys. The user explicitly approved requesting Total Regional Cores from 4 to 6 and conditionally applying that exact plan, but Azure returned terminal `Failed` state with `ResourceNotAvailableForOffer`; the effective limit remains 4 of 4, so nothing was applied or started. See `docs/evidence/phase2/checkpoint-c-recovery.md`; do not apply recovery, start VMs, or destroy without a new explicit approval.
 
 ---
 

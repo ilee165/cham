@@ -11,7 +11,7 @@ variable "location" {
 variable "vm_size" {
   description = "Azure VM SKU for the temporary verification VM."
   type        = string
-  default     = "Standard_B2ats_v2"
+  default     = "Standard_D2als_v6"
 }
 
 variable "resource_group_name" {

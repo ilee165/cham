@@ -13,17 +13,18 @@ resource "azurerm_resource_group" "lab" {
 }
 
 module "hub" {
-  source              = "../../modules/hub"
-  location            = var.location
-  vm_size             = var.vm_size
-  resource_group_name = azurerm_resource_group.lab.name
-  home_ip             = var.home_ip
-  ssh_public_key      = var.ssh_public_key
-  lab_zone            = var.lab_zone
-  onprem_dns_ip       = var.onprem_dns_ip
-  wg_transfer_cidr    = var.wg_transfer_cidr
-  wg_peer_public_key  = var.wg_peer_public_key
-  tags                = local.tags
+  source               = "../../modules/hub"
+  location             = var.location
+  vm_size              = var.vm_size
+  resource_group_name  = azurerm_resource_group.lab.name
+  home_ip              = var.home_ip
+  ssh_public_key       = var.ssh_public_key
+  lab_zone             = var.lab_zone
+  onprem_dns_ip        = var.onprem_dns_ip
+  spoke_address_spaces = ["10.10.4.0/22", "10.10.8.0/22"]
+  wg_transfer_cidr     = var.wg_transfer_cidr
+  wg_peer_public_key   = var.wg_peer_public_key
+  tags                 = local.tags
 }
 
 # Same module, two instantiations — the reusability story.
@@ -31,7 +32,7 @@ module "spoke_app" {
   source               = "../../modules/spoke"
   name                 = "app"
   location             = var.location
-  vm_size              = var.vm_size
+  vm_size              = var.test_vm_size
   resource_group_name  = azurerm_resource_group.lab.name
   address_space        = "10.10.4.0/22"
   subnets              = { workload = "10.10.4.0/24" }
@@ -51,7 +52,7 @@ module "spoke_mgmt" {
   source               = "../../modules/spoke"
   name                 = "mgmt"
   location             = var.location
-  vm_size              = var.vm_size
+  vm_size              = var.test_vm_size
   resource_group_name  = azurerm_resource_group.lab.name
   address_space        = "10.10.8.0/22"
   subnets              = { tools = "10.10.8.0/24" }
