@@ -104,6 +104,7 @@ module "dns_resolver" {
   hub_vnet_name       = module.hub.vnet_name
   lab_zone            = var.lab_zone
   hub_dns_ip          = module.hub.vm_private_ip
+  tags                = local.tags
 }
 
 # Budget alert — notification only. Azure has NO automatic spend cap.
