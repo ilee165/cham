@@ -1,3 +1,12 @@
+locals {
+  # Explicit subnet selection for the test VM. values(...)[0] picked whichever
+  # subnet key sorts first alphabetically — adding an earlier-sorting subnet
+  # (e.g. "bastion" before "workload") would silently re-home the NIC and force
+  # NIC/VM replacement. one() instead fails at plan time when the map grows
+  # beyond one subnet and no explicit test_vm_subnet_key was chosen.
+  test_vm_subnet_key = var.test_vm_subnet_key != null ? var.test_vm_subnet_key : one(keys(var.subnets))
+}
+
 resource "azurerm_network_interface" "testvm" {
   count               = var.enable_test_vm ? 1 : 0
   name                = "nic-testvm-${var.name}"
@@ -7,7 +16,7 @@ resource "azurerm_network_interface" "testvm" {
 
   ip_configuration {
     name                          = "primary"
-    subnet_id                     = values(azurerm_subnet.subnets)[0].id
+    subnet_id                     = azurerm_subnet.subnets[local.test_vm_subnet_key].id
     private_ip_address_allocation = "Dynamic"
   }
 }

@@ -69,6 +69,12 @@ variable "enable_test_vm" {
   default     = false
 }
 
+variable "test_vm_subnet_key" {
+  description = "Key in var.subnets whose subnet hosts the test VM NIC. Defaults to the sole subnet; must be set explicitly once the spoke has more than one subnet — the plan then fails loudly instead of silently re-homing the NIC to whichever key sorts first."
+  type        = string
+  default     = null
+}
+
 variable "admin_username" {
   description = "Administrator username for the temporary verification VM."
   type        = string
