@@ -108,7 +108,18 @@ variable "enable_test_vm" {
 
 variable "alert_email" { type = string }
 
+variable "budget_amount" {
+  description = "Monthly budget alert threshold in USD. Default 50 = one quarter of the $200 trial credit, so the 50%/90% notifications fire long before the credit is at risk. Notification-only — Azure has no automatic spend cap; the real kill switch is .github/workflows/destroy.yml."
+  type        = number
+  default     = 50
+}
+
 variable "budget_start_date" {
   description = "RFC3339 first-of-month, e.g. 2026-08-01T00:00:00Z"
   type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]{4}-[0-9]{2}-01T00:00:00(Z|[+]00:00)$", var.budget_start_date))
+    error_message = "budget_start_date must be UTC midnight on the FIRST of a month, e.g. 2026-08-01T00:00:00Z — Azure rejects any other start_date at apply time with an opaque error, so catch it at plan time."
+  }
 }

@@ -111,7 +111,7 @@ module "dns_resolver" {
 resource "azurerm_consumption_budget_subscription" "lab" {
   name            = "budget-cham-lab"
   subscription_id = "/subscriptions/${var.subscription_id}"
-  amount          = 50
+  amount          = var.budget_amount
   time_grain      = "Monthly"
 
   time_period {
