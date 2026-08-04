@@ -43,6 +43,7 @@ module "hub" {
   source                       = "../../modules/hub"
   location                     = var.location
   vm_size                      = var.vm_size
+  disk_controller_type         = var.hub_disk_controller_type
   resource_group_name          = azurerm_resource_group.lab.name
   home_ip                      = var.home_ip
   ssh_public_key               = var.ssh_public_key
@@ -63,6 +64,7 @@ module "spoke_app" {
   name                 = "app"
   location             = var.location
   vm_size              = var.test_vm_size
+  disk_controller_type = var.test_vm_disk_controller_type
   resource_group_name  = azurerm_resource_group.lab.name
   address_space        = local.spoke_cidrs.app
   subnets              = { workload = "10.10.4.0/24" }
@@ -84,6 +86,7 @@ module "spoke_mgmt" {
   name                 = "mgmt"
   location             = var.location
   vm_size              = var.test_vm_size
+  disk_controller_type = var.test_vm_disk_controller_type
   resource_group_name  = azurerm_resource_group.lab.name
   address_space        = local.spoke_cidrs.mgmt
   subnets              = { tools = "10.10.8.0/24" }

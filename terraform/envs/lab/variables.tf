@@ -15,6 +15,18 @@ variable "test_vm_size" {
   default     = "Standard_F1als_v7"
 }
 
+variable "hub_disk_controller_type" {
+  description = "Disk controller for the hub VM. Must match vm_size — the hub module cross-validates known families (v7 AMD sizes are NVMe-only, B-series SCSI-only), so a SKU fallback forces a conscious controller choice here instead of an apply-time failure."
+  type        = string
+  default     = "NVMe"
+}
+
+variable "test_vm_disk_controller_type" {
+  description = "Disk controller for both temporary verification VMs. Must match test_vm_size — the spoke module cross-validates known families."
+  type        = string
+  default     = "NVMe"
+}
+
 variable "subscription_id" { type = string }
 
 variable "public_zone" {
