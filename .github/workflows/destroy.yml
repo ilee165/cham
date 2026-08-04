@@ -1,44 +1,297 @@
-name: terraform-destroy
-# THE KILL SWITCH. Azure has no spend cap — this is the real one.
+name: terraform-destroy-reviewed-plan
+
+#checkov:skip=CKV_GHA_7:owner=repository-maintainer; exact=workflow_dispatch inputs; rationale=two-stage destroy requires the operator to carry the reviewed run ID, commit, hash, operation, and confirmation into the apply dispatch; control=current main, source workflow, immutable artifact manifest/hash, main-only environment, and required reviewer are verified before exact saved-plan apply.
 on:
   workflow_dispatch:
     inputs:
-      confirm:
-        description: 'Type DESTROY to confirm'
+      operation:
+        description: First create a destroy plan; later apply that exact artifact
         required: true
+        type: choice
+        options:
+          - plan
+          - apply
+        default: plan
+      source_commit:
+        description: Full 40-character current main commit SHA
+        required: true
+        type: string
+      plan_run_id:
+        description: For apply only, successful destroy-plan workflow run ID
+        required: false
+        type: string
+      plan_sha256:
+        description: For apply only, approved lowercase destroy-plan SHA-256
+        required: false
+        type: string
+      confirm:
+        description: Type PLAN_DESTROY for plan or DESTROY for exact-plan apply
+        required: true
+        type: string
 
 permissions:
   id-token: write
   contents: read
+  actions: read
+
+env:
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  TF_IN_AUTOMATION: "true"
 
 jobs:
-  destroy:
+  plan-destroy:
+    if: inputs.operation == 'plan' && inputs.confirm == 'PLAN_DESTROY'
     runs-on: ubuntu-latest
-    if: inputs.confirm == 'DESTROY'
     defaults:
       run:
+        shell: bash
         working-directory: terraform/envs/lab
+
     steps:
+      - name: Validate source commit
+        working-directory: .
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::source_commit must be a full lowercase commit SHA."; exit 1; }
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+
+      - name: Require current main commit
+        working-directory: .
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          [[ "$(git rev-parse origin/main)" == "$SOURCE_COMMIT" ]] || {
+            echo "::error::source_commit is not the current main commit."
+            exit 1
+          }
+
       - uses: hashicorp/setup-terraform@v3
-      - uses: azure/login@v2
+        with:
+          terraform_version: "~1.9.0"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - name: Destroy
+
+      - name: Resolve remote-state account
+        id: backend
+        run: |
+          set -euo pipefail
+          storage_account_name="$(az storage account list \
+            --resource-group rg-cham-tfstate \
+            --query '[0].name' \
+            --output tsv)"
+          if [[ -z "$storage_account_name" || "$storage_account_name" == "None" ]]; then
+            echo "::error::No Terraform state storage account was found in rg-cham-tfstate."
+            exit 1
+          fi
+          echo "::add-mask::$storage_account_name"
+          echo "name=$storage_account_name" >> "$GITHUB_OUTPUT"
+
+      - name: Create saved destroy plan and sanitized manifest
+        id: plan
         env:
-          ARM_USE_OIDC: "true"
           TF_VAR_home_ip: ${{ secrets.HOME_IP }}
           TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
           TF_VAR_wg_peer_public_key: ${{ secrets.WG_PEER_PUBLIC_KEY }}
           TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
           TF_VAR_budget_start_date: ${{ vars.BUDGET_START_DATE }}
+          TF_VAR_enable_test_vm_app: "false"
+          TF_VAR_enable_test_vm_mgmt: "false"
+          TF_VAR_enable_test_nic_app: "false"
+          TF_VAR_enable_test_nic_mgmt: "false"
+          TF_VAR_enable_private_resolver: "false"
         run: |
-          terraform init
-          terraform destroy -auto-approve
-      - name: Leftover check
+          set -euo pipefail
+          terraform init -input=false -reconfigure \
+            -backend-config="storage_account_name=${{ steps.backend.outputs.name }}" \
+            -backend-config="subscription_id=${ARM_SUBSCRIPTION_ID}" \
+            -backend-config="tenant_id=${ARM_TENANT_ID}"
+          terraform plan -destroy -input=false -no-color -out=destroy.tfplan
+
+          plan_sha256="$(sha256sum destroy.tfplan | awk '{print $1}')"
+          echo "sha256=$plan_sha256" >> "$GITHUB_OUTPUT"
+
+          jq -n \
+            --arg kind "destroy" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit_sha "$GITHUB_SHA" \
+            --arg workflow_run_id "$GITHUB_RUN_ID" \
+            --arg plan_sha256 "$plan_sha256" \
+            '{kind: $kind, repository: $repository, commit_sha: $commit_sha, workflow_run_id: $workflow_run_id, plan_sha256: $plan_sha256}' \
+            > destroy-manifest.json
+
+          terraform show -json destroy.tfplan \
+            | jq -r '.resource_changes[] | select(.change.actions != ["no-op"]) | "\(.change.actions | join(",")) \(.address)"' \
+            > destroy-summary.txt
+
+          {
+            echo "Destroy-plan commit: $GITHUB_SHA"
+            echo "Destroy-plan SHA-256: $plan_sha256"
+            echo "Resources selected by the saved destroy plan:"
+            sed 's/^/- /' destroy-summary.txt
+            echo
+            echo "Nothing was destroyed. Start a second run with operation=apply, this run ID, and this exact hash."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload immutable destroy-plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-destroy-${{ inputs.source_commit }}-${{ github.run_id }}
+          path: |
+            terraform/envs/lab/destroy.tfplan
+            terraform/envs/lab/destroy-manifest.json
+            terraform/envs/lab/destroy-summary.txt
+          if-no-files-found: error
+          retention-days: 3
+
+  apply-destroy:
+    if: inputs.operation == 'apply' && inputs.confirm == 'DESTROY'
+    runs-on: ubuntu-latest
+    environment: lab
+    defaults:
+      run:
+        shell: bash
+        working-directory: terraform/envs/lab
+
+    steps:
+      - name: Require configured environment reviewers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: .
         run: |
-          echo "Manually verify rg-cham-lab is empty — PIPs and disks can outlive VMs:"
-          az resource list --resource-group rg-cham-lab -o table || true
+          set -euo pipefail
+          reviewer_rules="$(gh api \
+            "repos/$GITHUB_REPOSITORY/environments/lab" \
+            --jq '[.protection_rules[] | select(.type == "required_reviewers")] | length')"
+          if [[ "$reviewer_rules" -lt 1 ]]; then
+            echo "::error::The lab environment has no required-reviewer protection rule. Nothing was destroyed."
+            exit 1
+          fi
+
+      - name: Validate approval inputs
+        working-directory: .
+        env:
+          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          APPROVED_SHA256: ${{ inputs.plan_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$PLAN_RUN_ID" =~ ^[0-9]+$ ]] || { echo "::error::plan_run_id must be numeric."; exit 1; }
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::source_commit must be a full lowercase commit SHA."; exit 1; }
+          [[ "$APPROVED_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::plan_sha256 must be a lowercase SHA-256."; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+
+      - name: Verify current main and destroy-plan workflow run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        working-directory: .
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          [[ "$(git rev-parse origin/main)" == "$SOURCE_COMMIT" ]] || {
+            echo "::error::main moved after destroy planning. Generate and approve a new destroy plan."
+            exit 1
+          }
+
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PLAN_RUN_ID")"
+          [[ "$(jq -r '.event' <<< "$run_json")" == "workflow_dispatch" ]] || { echo "::error::Destroy plan must come from workflow_dispatch."; exit 1; }
+          [[ "$(jq -r '.head_branch' <<< "$run_json")" == "main" ]] || { echo "::error::Destroy plan did not run on main."; exit 1; }
+          [[ "$(jq -r '.head_sha' <<< "$run_json")" == "$SOURCE_COMMIT" ]] || { echo "::error::Destroy-plan commit mismatch."; exit 1; }
+          [[ "$(jq -r '.conclusion' <<< "$run_json")" == "success" ]] || { echo "::error::Destroy-plan run did not complete successfully."; exit 1; }
+          [[ "$(jq -r '.path' <<< "$run_json")" == ".github/workflows/destroy.yml" ]] || { echo "::error::Run ID is not from the destroy workflow."; exit 1; }
+
+      - name: Download reviewed destroy plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-destroy-${{ inputs.source_commit }}-${{ inputs.plan_run_id }}
+          path: terraform/envs/lab
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.plan_run_id }}
+
+      - name: Verify destroy artifact manifest and approved hash
+        env:
+          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          APPROVED_SHA256: ${{ inputs.plan_sha256 }}
+        run: |
+          set -euo pipefail
+          computed_sha256="$(sha256sum destroy.tfplan | awk '{print $1}')"
+          manifest_sha256="$(jq -r '.plan_sha256' destroy-manifest.json)"
+          manifest_commit="$(jq -r '.commit_sha' destroy-manifest.json)"
+          manifest_run_id="$(jq -r '.workflow_run_id' destroy-manifest.json)"
+          manifest_repository="$(jq -r '.repository' destroy-manifest.json)"
+          manifest_kind="$(jq -r '.kind' destroy-manifest.json)"
+
+          [[ "$manifest_kind" == "destroy" ]] || { echo "::error::Artifact is not a destroy plan."; exit 1; }
+          [[ "$manifest_repository" == "$GITHUB_REPOSITORY" ]] || { echo "::error::Artifact repository mismatch."; exit 1; }
+          [[ "$manifest_commit" == "$SOURCE_COMMIT" ]] || { echo "::error::Artifact commit mismatch."; exit 1; }
+          [[ "$manifest_run_id" == "$PLAN_RUN_ID" ]] || { echo "::error::Artifact run ID mismatch."; exit 1; }
+          [[ "$manifest_sha256" == "$APPROVED_SHA256" ]] || { echo "::error::Manifest hash differs from approved hash."; exit 1; }
+          [[ "$computed_sha256" == "$APPROVED_SHA256" ]] || { echo "::error::Saved destroy-plan hash verification failed."; exit 1; }
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9.0"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve remote-state account
+        id: backend
+        run: |
+          set -euo pipefail
+          storage_account_name="$(az storage account list \
+            --resource-group rg-cham-tfstate \
+            --query '[0].name' \
+            --output tsv)"
+          if [[ -z "$storage_account_name" || "$storage_account_name" == "None" ]]; then
+            echo "::error::No Terraform state storage account was found in rg-cham-tfstate."
+            exit 1
+          fi
+          echo "::add-mask::$storage_account_name"
+          echo "name=$storage_account_name" >> "$GITHUB_OUTPUT"
+
+      - name: Apply exact reviewed destroy plan
+        run: |
+          set -euo pipefail
+          terraform init -input=false -reconfigure \
+            -backend-config="storage_account_name=${{ steps.backend.outputs.name }}" \
+            -backend-config="subscription_id=${ARM_SUBSCRIPTION_ID}" \
+            -backend-config="tenant_id=${ARM_TENANT_ID}"
+          terraform apply -input=false destroy.tfplan
+
+      - name: Verify lab resource group is empty
+        run: |
+          set -euo pipefail
+          group_exists="$(az group exists --name rg-cham-lab --output tsv)"
+          [[ "$group_exists" == "false" ]] || {
+            echo "::error::rg-cham-lab still exists after the reviewed destroy plan."
+            az resource list --resource-group rg-cham-lab --query '[].{type:type,name:name}' --output table
+            exit 1
+          }

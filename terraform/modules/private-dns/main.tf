@@ -1,6 +1,17 @@
 # Private DNS zone linked to hub + spokes.
 # Auto-registration ON for spokes (VMs self-register), OFF for hub.
 
+terraform {
+  required_version = ">= 1.9"
+
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
+    }
+  }
+}
+
 resource "azurerm_private_dns_zone" "zone" {
   name                = var.zone_name # e.g. azure.dwsolution.co
   resource_group_name = var.resource_group_name
@@ -17,8 +28,8 @@ resource "azurerm_private_dns_zone_virtual_network_link" "links" {
   tags                  = var.tags
 }
 
-# Static records managed by the reconciler land here too — Terraform owns
-# only the seed records; drift detection is the reconciler's job.
+# Terraform owns only these seed records. The reconciler later owns a disjoint
+# managed record set so the two systems do not contend for the same names.
 resource "azurerm_private_dns_a_record" "static" {
   for_each            = var.a_records
   name                = each.key

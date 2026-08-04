@@ -3,16 +3,25 @@
 Short ADRs. Format: context → decision → tradeoff accepted. These are
 interview material as much as documentation.
 
-## ADR-001: BIND9 on a B1s VM instead of Azure DNS Private Resolver
+## ADR-001: BIND9 on a burstable VM instead of Azure DNS Private Resolver
 - **Context:** Hybrid resolution needs a forwarder in the hub. Private
   Resolver is the managed answer at ~$180/mo per endpoint (~$360 both ways);
-  a B1s VM is free-tier.
-- **Decision:** BIND9 on the hub VM as the daily driver; Private Resolver
-  exists as a flag-gated module exercised in one paid session (~$2).
+  a small VM used only during bounded lab sessions has materially lower cost.
+- **Decision:** BIND9 on a parameterized small hub VM; Private Resolver
+  remains flag-gated. No free-service entitlement is assumed.
+- **Amended 2026-08-03:** the original B2ats v2 / North Central US sizing is
+  superseded. NCUS could not supply six regional cores (terminal
+  `ResourceNotAvailableForOffer`) nor any usable one-vCPU SKU, and this
+  subscription gets no x86 B-family SKU in any probed region. The lab now
+  runs in East US 2 on NVMe-only v7 sizes — `Standard_D2als_v7` hub,
+  `Standard_F1als_v7` test VMs (evidence: `docs/evidence/phase2/`). The
+  core decision — BIND9 on a VM instead of the managed resolver — is
+  unchanged.
 - **Tradeoff accepted:** we own patching, HA (none — single VM), and zone
   redundancy that the managed service would provide. Right call at lab
-  scale; at production scale the calculus reverses and the flag flip is
-  the migration.
+  scale. The flag provisions a testable managed resolver path, but the current
+  spokes keep using custom DNS on the hub VM; a production cutover must also
+  move clients to Azure-provided DNS (or otherwise redirect their DNS path).
 
 ## ADR-002: WireGuard instead of Azure VPN Gateway
 - **Context:** Site-to-site tunnel laptop↔Azure. VPN Gateway Basic ~$29/mo,

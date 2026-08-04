@@ -7,7 +7,19 @@
 # Subnets must be /28+, delegated to Microsoft.Network/dnsResolvers, and
 # usable for nothing else.
 
+terraform {
+  required_version = ">= 1.9"
+
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
+    }
+  }
+}
+
 resource "azurerm_subnet" "resolver_inbound" {
+  #checkov:skip=CKV2_AZURE_31:owner=repository-maintainer; exact=azurerm_subnet.resolver_inbound; rationale=the dedicated delegated subnet is reserved for the managed DNS Private Resolver endpoint; control=the feature remains hard-disabled throughout Phase 2 and requires a separate cost approval in a later phase.
   count                = var.enabled ? 1 : 0
   name                 = "snet-resolver-in"
   resource_group_name  = var.resource_group_name
@@ -24,6 +36,7 @@ resource "azurerm_subnet" "resolver_inbound" {
 }
 
 resource "azurerm_subnet" "resolver_outbound" {
+  #checkov:skip=CKV2_AZURE_31:owner=repository-maintainer; exact=azurerm_subnet.resolver_outbound; rationale=the dedicated delegated subnet is reserved for the managed DNS Private Resolver endpoint; control=the feature remains hard-disabled throughout Phase 2 and requires a separate cost approval in a later phase.
   count                = var.enabled ? 1 : 0
   name                 = "snet-resolver-out"
   resource_group_name  = var.resource_group_name
@@ -39,12 +52,44 @@ resource "azurerm_subnet" "resolver_outbound" {
   }
 }
 
+# Queries from the laptop/on-premises side arrive through the hub NVA. Azure's
+# system routes do not know that those source prefixes live behind that NVA, so
+# the inbound endpoint subnet needs an explicit symmetric return path.
+resource "azurerm_route_table" "resolver_inbound" {
+  count               = var.enabled ? 1 : 0
+  name                = "rt-resolver-inbound"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  tags                = var.tags
+
+  route {
+    name                   = "onprem-via-hub-nva"
+    address_prefix         = var.onprem_address_space
+    next_hop_type          = "VirtualAppliance"
+    next_hop_in_ip_address = var.hub_nva_ip
+  }
+
+  route {
+    name                   = "wireguard-via-hub-nva"
+    address_prefix         = var.wg_transfer_cidr
+    next_hop_type          = "VirtualAppliance"
+    next_hop_in_ip_address = var.hub_nva_ip
+  }
+}
+
+resource "azurerm_subnet_route_table_association" "resolver_inbound" {
+  count          = var.enabled ? 1 : 0
+  subnet_id      = azurerm_subnet.resolver_inbound[0].id
+  route_table_id = azurerm_route_table.resolver_inbound[0].id
+}
+
 resource "azurerm_private_dns_resolver" "resolver" {
   count               = var.enabled ? 1 : 0
   name                = "dnspr-hub"
   location            = var.location
   resource_group_name = var.resource_group_name
   virtual_network_id  = var.hub_vnet_id
+  tags                = var.tags
 }
 
 resource "azurerm_private_dns_resolver_inbound_endpoint" "inbound" {
@@ -52,10 +97,13 @@ resource "azurerm_private_dns_resolver_inbound_endpoint" "inbound" {
   name                    = "in-endpoint"
   location                = var.location
   private_dns_resolver_id = azurerm_private_dns_resolver.resolver[0].id
+  tags                    = var.tags
 
   ip_configurations {
     subnet_id = azurerm_subnet.resolver_inbound[0].id
   }
+
+  depends_on = [azurerm_subnet_route_table_association.resolver_inbound]
 }
 
 resource "azurerm_private_dns_resolver_outbound_endpoint" "outbound" {
@@ -64,6 +112,7 @@ resource "azurerm_private_dns_resolver_outbound_endpoint" "outbound" {
   location                = var.location
   private_dns_resolver_id = azurerm_private_dns_resolver.resolver[0].id
   subnet_id               = azurerm_subnet.resolver_outbound[0].id
+  tags                    = var.tags
 }
 
 resource "azurerm_private_dns_resolver_dns_forwarding_ruleset" "ruleset" {
@@ -72,6 +121,17 @@ resource "azurerm_private_dns_resolver_dns_forwarding_ruleset" "ruleset" {
   location                                   = var.location
   resource_group_name                        = var.resource_group_name
   private_dns_resolver_outbound_endpoint_ids = [azurerm_private_dns_resolver_outbound_endpoint.outbound[0].id]
+  tags                                       = var.tags
+}
+
+# A forwarding ruleset does not affect queries until it is linked to each
+# querying VNet. Keep all links behind the same cost gate as the endpoints.
+resource "azurerm_private_dns_resolver_virtual_network_link" "links" {
+  for_each = var.enabled ? var.forwarding_vnet_links : {}
+
+  name                      = "link-${each.key}"
+  dns_forwarding_ruleset_id = azurerm_private_dns_resolver_dns_forwarding_ruleset.ruleset[0].id
+  virtual_network_id        = each.value
 }
 
 resource "azurerm_private_dns_resolver_forwarding_rule" "lab" {
@@ -81,8 +141,12 @@ resource "azurerm_private_dns_resolver_forwarding_rule" "lab" {
   domain_name               = "${var.lab_zone}." # trailing dot required
   enabled                   = true
 
+  # Target the hub BIND9 VM: reachable in-VNet from the outbound endpoint and
+  # already forwarding the lab zone across the tunnel. Targeting the laptop
+  # tunnel IP directly cannot work — snet-resolver-out has no route to the
+  # WireGuard transfer network, so those queries would be silently dropped.
   target_dns_servers {
-    ip_address = var.onprem_dns_ip
+    ip_address = var.hub_dns_ip
     port       = 53
   }
 }

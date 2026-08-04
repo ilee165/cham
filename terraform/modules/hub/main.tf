@@ -1,6 +1,17 @@
-# Hub module — hub VNet plus the B1s VM running WireGuard + BIND9.
+# Hub module — hub VNet plus the burstable VM running WireGuard + BIND9.
 # This VM is the NVA: spokes route through it, and it forwards DNS
 # conditionally to on-prem (lab zone) or Azure-provided DNS (everything else).
+
+terraform {
+  required_version = ">= 1.9"
+
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
+    }
+  }
+}
 
 resource "azurerm_virtual_network" "hub" {
   name                = "vnet-hub"
@@ -41,6 +52,11 @@ resource "azurerm_network_security_group" "hub" {
   resource_group_name = var.resource_group_name
   tags                = var.tags
 
+  # Rules 100-120 are destination-scoped to the hub VM, not "*": this NSG is
+  # associated to BOTH hub subnets, so a wildcard destination would silently
+  # extend SSH/WireGuard/DNS exposure to anything later placed in snet-shared.
+  # (NSGs evaluate after DNAT, so traffic to the public IP matches the
+  # private hub_vm_ip here.)
   security_rule {
     name                       = "AllowWireGuardFromHome"
     priority                   = 100
@@ -50,7 +66,7 @@ resource "azurerm_network_security_group" "hub" {
     source_port_range          = "*"
     destination_port_range     = "51820"
     source_address_prefix      = var.home_ip # /32 — never widen this
-    destination_address_prefix = "*"
+    destination_address_prefix = var.hub_vm_ip
   }
 
   security_rule {
@@ -62,7 +78,7 @@ resource "azurerm_network_security_group" "hub" {
     source_port_range          = "*"
     destination_port_range     = "22"
     source_address_prefix      = var.home_ip
-    destination_address_prefix = "*"
+    destination_address_prefix = var.hub_vm_ip
   }
 
   security_rule {
@@ -73,10 +89,57 @@ resource "azurerm_network_security_group" "hub" {
     protocol                   = "*"
     source_port_range          = "*"
     destination_port_ranges    = ["53"]
-    source_address_prefixes    = ["10.10.0.0/16", "10.20.0.0/16"]
-    destination_address_prefix = "*"
+    source_address_prefixes    = ["10.10.0.0/16", var.onprem_address_space, var.wg_transfer_cidr]
+    destination_address_prefix = var.hub_vm_ip
   }
 
+  security_rule {
+    name                       = "AllowInternetTransitFromSpokes"
+    priority                   = 130
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefixes    = var.spoke_address_spaces
+    destination_address_prefix = "Internet"
+  }
+
+  # Explicit allow for spoke -> wg-transfer flows. Without it the return leg
+  # of spoke->172.16.x traffic relies on RFC1918 space matching the "Internet"
+  # service tag in rule 130, which is undocumented behavior.
+  security_rule {
+    name                       = "AllowWgTransferTransitFromSpokes"
+    priority                   = 135
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefixes    = var.spoke_address_spaces
+    destination_address_prefix = var.wg_transfer_cidr
+  }
+
+  security_rule {
+    name                       = "AllowOnPremTransitFromSpokes"
+    priority                   = 140
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefixes    = var.spoke_address_spaces
+    destination_address_prefix = var.onprem_address_space
+  }
+
+  # ICMP note: ping to the hub VM is INTENTIONALLY blocked. Rules 100-120 are
+  # port-scoped (ICMP has no ports, so they never match), rules 130/135/140
+  # exclude VNet destinations, and this deny fires before the default
+  # AllowVnetInBound — so "DNS works but ping 10.10.0.10 fails" is expected
+  # behavior during verification, not an NVA fault. If ping diagnostics are
+  # ever wanted, add an Allow with protocol = "Icmp",
+  # destination_port_range = "*", sources 10.10.0.0/16 / var.wg_transfer_cidr /
+  # var.onprem_address_space, at a priority below 4000.
   security_rule {
     name                       = "DenyAllOtherInbound"
     priority                   = 4000
@@ -85,8 +148,46 @@ resource "azurerm_network_security_group" "hub" {
     protocol                   = "*"
     source_port_range          = "*"
     destination_port_range     = "*"
-    source_address_prefix      = "Internet"
+    source_address_prefix      = "*"
     destination_address_prefix = "*"
+  }
+
+  # Outbound leg of tunnel-initiated flows (laptop/on-prem -> spoke): after
+  # wg0 decapsulation the packet leaves this NIC as a NEW outbound flow whose
+  # source (on-prem / wg-transfer space) is outside the VNet, so the default
+  # AllowVnetOutBound never matches and DenyAllOutBound (65500) would drop it.
+  # Mirrors the inbound transit intent of rules 130/140.
+  security_rule {
+    name                         = "AllowOutboundForwardedToSpokes"
+    priority                     = 130
+    direction                    = "Outbound"
+    access                       = "Allow"
+    protocol                     = "*"
+    source_port_range            = "*"
+    destination_port_range       = "*"
+    source_address_prefixes      = [var.onprem_address_space, var.wg_transfer_cidr]
+    destination_address_prefixes = var.spoke_address_spaces
+  }
+
+  # The inbound resolver endpoint is reached through this NVA by packets
+  # decapsulated from WireGuard. Their source prefixes are not part of the
+  # Azure VirtualNetwork service tag, so the default outbound allow does not
+  # match. Keep the exception DNS-only and create it only with the paid
+  # resolver feature.
+  dynamic "security_rule" {
+    for_each = var.enable_private_resolver ? [1] : []
+
+    content {
+      name                       = "AllowDnsResolverFromTunnel"
+      priority                   = 120
+      direction                  = "Outbound"
+      access                     = "Allow"
+      protocol                   = "*"
+      source_port_range          = "*"
+      destination_port_range     = "53"
+      source_address_prefixes    = [var.onprem_address_space, var.wg_transfer_cidr]
+      destination_address_prefix = var.resolver_inbound_subnet_cidr
+    }
   }
 }
 
@@ -95,8 +196,14 @@ resource "azurerm_subnet_network_security_group_association" "vpn" {
   network_security_group_id = azurerm_network_security_group.hub.id
 }
 
+resource "azurerm_subnet_network_security_group_association" "shared" {
+  subnet_id                 = azurerm_subnet.shared.id
+  network_security_group_id = azurerm_network_security_group.hub.id
+}
+
 # --- NIC with IP forwarding (NVA requirement #1 of 2 — #2 is sysctl in cloud-init) ---
 resource "azurerm_network_interface" "hub" {
+  #checkov:skip=CKV_AZURE_119:owner=repository-maintainer; exact=azurerm_network_interface.hub; rationale=the hub NIC is the approved WireGuard public endpoint; control=Standard static IP, home-/32 SSH and UDP allows, and a terminal inbound deny restrict exposure.
   name                  = "nic-hub-ddi"
   location              = var.location
   resource_group_name   = var.resource_group_name
@@ -112,15 +219,18 @@ resource "azurerm_network_interface" "hub" {
   }
 }
 
-# --- The B1s VM (free tier: 750 hrs/mo for 12 months — run ONE) ---
+# --- Cost-bearing hub VM; review current subscription pricing before apply ---
 resource "azurerm_linux_virtual_machine" "hub" {
-  name                = "vm-hub-ddi"
-  location            = var.location
-  resource_group_name = var.resource_group_name
-  size                = "Standard_B1s"
-  admin_username      = var.admin_username
-  network_interface_ids = [azurerm_network_interface.hub.id]
-  tags                = var.tags
+  name                       = "vm-hub-ddi"
+  location                   = var.location
+  resource_group_name        = var.resource_group_name
+  size                       = var.vm_size
+  admin_username             = var.admin_username
+  allow_extension_operations = false
+  network_interface_ids      = [azurerm_network_interface.hub.id]
+  tags                       = var.tags
+
+  disk_controller_type = var.disk_controller_type
 
   admin_ssh_key {
     username   = var.admin_username
@@ -129,7 +239,7 @@ resource "azurerm_linux_virtual_machine" "hub" {
 
   os_disk {
     caching              = "ReadWrite"
-    storage_account_type = "Standard_LRS" # stay inside free 64GB allotment
+    storage_account_type = "Standard_LRS"
     disk_size_gb         = 30
   }
 
@@ -140,10 +250,18 @@ resource "azurerm_linux_virtual_machine" "hub" {
     version   = "latest"
   }
 
-  custom_data = base64encode(templatefile("${path.module}/cloud-init.yml.tpl", {
-    onprem_cidr        = var.onprem_address_space
+  # Normalize the checked-out template to LF before encoding. Without this,
+  # Windows CRLF checkout changes produce a byte-only custom_data diff and
+  # force replacement of the hub VM even when every rendered line is equal.
+  custom_data = base64encode(replace(templatefile("${path.module}/cloud-init.yml.tpl", {
+    onprem_cidr      = var.onprem_address_space
+    wg_transfer_cidr = var.wg_transfer_cidr
+    # WG interface address derived from wg_transfer_cidr (host .1, same mask)
+    # so the tunnel follows the variable instead of a hardcoded 172.16.0.1/24.
+    # Renders identically to the old literal under the default CIDR.
+    wg_interface_cidr  = "${cidrhost(var.wg_transfer_cidr, 1)}/${split("/", var.wg_transfer_cidr)[1]}"
     lab_zone           = var.lab_zone
     onprem_dns_ip      = var.onprem_dns_ip # laptop BIND9 via tunnel
     wg_peer_public_key = var.wg_peer_public_key
-  }))
+  }), "\r\n", "\n"))
 }

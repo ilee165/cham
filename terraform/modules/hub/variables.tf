@@ -1,6 +1,33 @@
 variable "location" {
-  type    = string
-  default = "eastus"
+  description = "Azure region. No default on purpose: callers must pass the lab region explicitly, otherwise an omitted argument silently splits the deployment across regions (peering still works, so it fails as quota/latency/cost, not loudly)."
+  type        = string
+}
+
+variable "vm_size" {
+  description = "Azure VM SKU for the hub BIND9/WireGuard appliance. Must support the controller chosen in disk_controller_type."
+  type        = string
+  default     = "Standard_D2als_v7"
+}
+
+variable "disk_controller_type" {
+  description = "Disk controller for the hub VM. Must match what vm_size supports: the v7 AMD families this lab can obtain (D*a*_v7, F*a*_v7) are NVMe-only, while B-series sizes are SCSI-only. A mismatch would plan cleanly and fail at Azure apply, and cross-controller changes require VM redeployment, so the known families are cross-checked below."
+  type        = string
+  default     = "NVMe"
+
+  validation {
+    condition     = contains(["SCSI", "NVMe"], var.disk_controller_type)
+    error_message = "disk_controller_type must be \"SCSI\" or \"NVMe\"."
+  }
+
+  validation {
+    condition     = !(can(regex("^Standard_B", var.vm_size)) && var.disk_controller_type == "NVMe")
+    error_message = "vm_size is a B-series (SCSI-only) size but disk_controller_type is \"NVMe\" — this pairing plans cleanly and fails at Azure apply. Set disk_controller_type = \"SCSI\" when falling back to a B-series SKU."
+  }
+
+  validation {
+    condition     = !(can(regex("^Standard_[DF][0-9]+a[a-z]*_v7$", var.vm_size)) && var.disk_controller_type == "SCSI")
+    error_message = "vm_size is an NVMe-only v7 AMD size but disk_controller_type is \"SCSI\". Set disk_controller_type = \"NVMe\" for D*a*_v7 / F*a*_v7 sizes. (Guard covers the families this lab uses; verify controller support for other exotic sizes.)"
+  }
 }
 
 variable "resource_group_name" { type = string }
@@ -24,11 +51,27 @@ variable "hub_vm_ip" {
   description = "Static private IP of the hub VM — referenced by spoke UDRs and VNet DNS"
   type        = string
   default     = "10.10.0.10"
+
+  validation {
+    condition = (
+      can(cidrhost("${var.hub_vm_ip}/32", 0)) &&
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$", var.hub_vm_ip))
+    )
+    error_message = "hub_vm_ip must be a single IPv4 address without a mask, e.g. 10.10.0.10."
+  }
 }
 
 variable "home_ip" {
   description = "Your home public IP as /32. NEVER widen. Not committed — set in tfvars (gitignored) or TF_VAR env."
   type        = string
+
+  validation {
+    condition = (
+      can(cidrhost(var.home_ip, 0)) &&
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/32$", var.home_ip))
+    )
+    error_message = "home_ip must be one valid IPv4 host expressed as a /32."
+  }
 }
 
 variable "admin_username" {
@@ -39,8 +82,72 @@ variable "admin_username" {
 variable "ssh_public_key" { type = string }
 
 variable "onprem_address_space" {
-  type    = string
-  default = "10.20.0.0/16"
+  description = "On-prem CIDR. No default on purpose: callers must wire the same value the spokes receive, or hub NSG rules and the cloud-init render silently diverge from the spoke view."
+  type        = string
+
+  validation {
+    condition = (
+      can(cidrhost(var.onprem_address_space, 0)) &&
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.onprem_address_space))
+    )
+    error_message = "onprem_address_space must be an IPv4 CIDR like 10.20.0.0/16 — it renders into named.conf ACLs, WireGuard AllowedIPs, and NSG rules."
+  }
+
+  validation {
+    condition = anytrue([
+      for block in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] :
+      tonumber(split("/", var.onprem_address_space)[1]) >= tonumber(split("/", block)[1]) &&
+      try(cidrsubnet(format("%s/%s", split("/", var.onprem_address_space)[0], split("/", block)[1]), 0, 0) == block, false)
+    ]) && tonumber(split("/", var.onprem_address_space)[1]) <= 30
+    error_message = "onprem_address_space must be an RFC1918 subnet no smaller than /30 — this module renders it into the public-IP hub's NSG allow rules and BIND allow-query/allow-recursion, so a public or over-broad range (e.g. 0.0.0.0/0) would expose an open recursive resolver regardless of what the calling root validates."
+  }
+}
+
+variable "spoke_address_spaces" {
+  description = "Spoke CIDRs permitted to transit the hub NVA toward Internet and on-premises destinations."
+  type        = list(string)
+}
+
+variable "wg_transfer_cidr" {
+  description = "WireGuard transfer network allowed to query DNS and reach spoke workloads."
+  type        = string
+  default     = "172.16.0.0/24"
+
+  validation {
+    condition = (
+      can(cidrhost(var.wg_transfer_cidr, 0)) &&
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.wg_transfer_cidr))
+    )
+    error_message = "wg_transfer_cidr must be an IPv4 CIDR like 172.16.0.0/24 — cidrhost() derives the WireGuard interface address from it and it renders into named.conf ACLs and NSG rules."
+  }
+
+  validation {
+    condition = anytrue([
+      for block in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] :
+      tonumber(split("/", var.wg_transfer_cidr)[1]) >= tonumber(split("/", block)[1]) &&
+      try(cidrsubnet(format("%s/%s", split("/", var.wg_transfer_cidr)[0], split("/", block)[1]), 0, 0) == block, false)
+    ]) && tonumber(split("/", var.wg_transfer_cidr)[1]) >= 16 && tonumber(split("/", var.wg_transfer_cidr)[1]) <= 30 && can(cidrhost(var.wg_transfer_cidr, 2))
+    error_message = "wg_transfer_cidr must be an RFC1918 subnet between /16 and /30 with at least two usable hosts — it feeds this module's public-facing DNS ACLs and NSG allow rules, and the derived WireGuard endpoint (.1) and peer (.2) must both exist inside it."
+  }
+}
+
+variable "enable_private_resolver" {
+  description = "Whether the cost-gated DNS Private Resolver is enabled. Controls only the matching tunnel-to-inbound-endpoint NSG rule in this module."
+  type        = bool
+  default     = false
+}
+
+variable "resolver_inbound_subnet_cidr" {
+  description = "Dedicated DNS Private Resolver inbound subnet permitted as a tunnel-originated DNS destination only when enable_private_resolver is true."
+  type        = string
+
+  validation {
+    condition = (
+      can(cidrhost(var.resolver_inbound_subnet_cidr, 0)) &&
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.resolver_inbound_subnet_cidr))
+    )
+    error_message = "resolver_inbound_subnet_cidr must be a valid IPv4 CIDR such as 10.10.2.0/28."
+  }
 }
 
 variable "lab_zone" {
@@ -51,6 +158,14 @@ variable "lab_zone" {
 variable "onprem_dns_ip" {
   description = "Laptop BIND9 IP reachable via tunnel"
   type        = string
+
+  validation {
+    condition = (
+      can(cidrhost("${var.onprem_dns_ip}/32", 0)) &&
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$", var.onprem_dns_ip))
+    )
+    error_message = "onprem_dns_ip must be a single IPv4 address without a mask — it renders into the named.conf forwarders clause and WireGuard AllowedIPs."
+  }
 }
 
 variable "wg_peer_public_key" {

@@ -1,37 +1,162 @@
-name: terraform-apply
+name: terraform-apply-reviewed-plan
+
+#checkov:skip=CKV_GHA_7:owner=repository-maintainer; exact=workflow_dispatch inputs; rationale=run ID, commit, SHA-256, and confirmation are the operator's reviewed-plan approval binding; control=all formats, the successful source workflow, current main, immutable artifact manifest/hash, main-only environment, and required reviewer are verified before Azure login or Terraform apply.
 on:
-  push:
-    branches: [main]
-    paths: ["terraform/**"]
+  workflow_dispatch:
+    inputs:
+      plan_run_id:
+        description: Successful terraform-plan workflow run ID from main
+        required: true
+        type: string
+      source_commit:
+        description: Full 40-character main commit SHA used to create the plan
+        required: true
+        type: string
+      plan_sha256:
+        description: Approved lowercase SHA-256 from the saved-plan summary
+        required: true
+        type: string
+      confirm:
+        description: Type APPLY to apply this exact reviewed plan
+        required: true
+        type: string
 
 permissions:
   id-token: write
   contents: read
+  actions: read
+
+env:
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  TF_IN_AUTOMATION: "true"
 
 jobs:
   apply:
+    if: inputs.confirm == 'APPLY'
     runs-on: ubuntu-latest
-    environment: lab   # environment protection rule = manual approval gate
+    environment: lab
     defaults:
       run:
+        shell: bash
         working-directory: terraform/envs/lab
+
     steps:
+      - name: Require configured environment reviewers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: .
+        run: |
+          set -euo pipefail
+          reviewer_rules="$(gh api \
+            "repos/$GITHUB_REPOSITORY/environments/lab" \
+            --jq '[.protection_rules[] | select(.type == "required_reviewers")] | length')"
+          if [[ "$reviewer_rules" -lt 1 ]]; then
+            echo "::error::The lab environment has no required-reviewer protection rule. Nothing was applied."
+            exit 1
+          fi
+
+      - name: Validate approval inputs
+        working-directory: .
+        env:
+          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          APPROVED_SHA256: ${{ inputs.plan_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$PLAN_RUN_ID" =~ ^[0-9]+$ ]] || { echo "::error::plan_run_id must be numeric."; exit 1; }
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::source_commit must be a full lowercase commit SHA."; exit 1; }
+          [[ "$APPROVED_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::plan_sha256 must be a lowercase SHA-256."; exit 1; }
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+
+      - name: Verify current main and source workflow run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        working-directory: .
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          current_main="$(git rev-parse origin/main)"
+          [[ "$current_main" == "$SOURCE_COMMIT" ]] || {
+            echo "::error::main moved after planning. Generate and approve a new saved plan."
+            exit 1
+          }
+
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PLAN_RUN_ID")"
+          [[ "$(jq -r '.event' <<< "$run_json")" == "workflow_dispatch" ]] || { echo "::error::Plan must come from a manual workflow dispatch."; exit 1; }
+          [[ "$(jq -r '.head_branch' <<< "$run_json")" == "main" ]] || { echo "::error::Plan workflow did not run on main."; exit 1; }
+          [[ "$(jq -r '.head_sha' <<< "$run_json")" == "$SOURCE_COMMIT" ]] || { echo "::error::Plan workflow commit does not match source_commit."; exit 1; }
+          [[ "$(jq -r '.conclusion' <<< "$run_json")" == "success" ]] || { echo "::error::Plan workflow did not complete successfully."; exit 1; }
+          [[ "$(jq -r '.path' <<< "$run_json")" == ".github/workflows/plan.yml" ]] || { echo "::error::Run ID is not from terraform-plan."; exit 1; }
+
+      - name: Download reviewed saved plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-${{ inputs.source_commit }}
+          path: terraform/envs/lab
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.plan_run_id }}
+
+      - name: Verify artifact manifest and approved hash
+        env:
+          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          APPROVED_SHA256: ${{ inputs.plan_sha256 }}
+        run: |
+          set -euo pipefail
+          computed_sha256="$(sha256sum tfplan | awk '{print $1}')"
+          manifest_sha256="$(jq -r '.plan_sha256' plan-manifest.json)"
+          manifest_commit="$(jq -r '.commit_sha' plan-manifest.json)"
+          manifest_run_id="$(jq -r '.workflow_run_id' plan-manifest.json)"
+          manifest_repository="$(jq -r '.repository' plan-manifest.json)"
+          manifest_kind="$(jq -r '.kind' plan-manifest.json)"
+
+          [[ "$manifest_kind" == "apply" ]] || { echo "::error::Artifact is not an apply plan."; exit 1; }
+          [[ "$manifest_repository" == "$GITHUB_REPOSITORY" ]] || { echo "::error::Artifact repository mismatch."; exit 1; }
+          [[ "$manifest_commit" == "$SOURCE_COMMIT" ]] || { echo "::error::Artifact commit mismatch."; exit 1; }
+          [[ "$manifest_run_id" == "$PLAN_RUN_ID" ]] || { echo "::error::Artifact run ID mismatch."; exit 1; }
+          [[ "$manifest_sha256" == "$APPROVED_SHA256" ]] || { echo "::error::Manifest hash differs from approved hash."; exit 1; }
+          [[ "$computed_sha256" == "$APPROVED_SHA256" ]] || { echo "::error::Saved-plan hash verification failed."; exit 1; }
+
       - uses: hashicorp/setup-terraform@v3
-      - uses: azure/login@v2
+        with:
+          terraform_version: "~1.9.0"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - name: Apply
-        env:
-          ARM_USE_OIDC: "true"
-          TF_VAR_home_ip: ${{ secrets.HOME_IP }}
-          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
-          TF_VAR_wg_peer_public_key: ${{ secrets.WG_PEER_PUBLIC_KEY }}
-          TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
-          TF_VAR_budget_start_date: ${{ vars.BUDGET_START_DATE }}
+
+      - name: Resolve remote-state account
+        id: backend
         run: |
-          terraform init
-          terraform apply -auto-approve
+          set -euo pipefail
+          storage_account_name="$(az storage account list \
+            --resource-group rg-cham-tfstate \
+            --query '[0].name' \
+            --output tsv)"
+          if [[ -z "$storage_account_name" || "$storage_account_name" == "None" ]]; then
+            echo "::error::No Terraform state storage account was found in rg-cham-tfstate."
+            exit 1
+          fi
+          echo "::add-mask::$storage_account_name"
+          echo "name=$storage_account_name" >> "$GITHUB_OUTPUT"
+
+      - name: Apply exact reviewed plan
+        run: |
+          set -euo pipefail
+          terraform init -input=false -reconfigure \
+            -backend-config="storage_account_name=${{ steps.backend.outputs.name }}" \
+            -backend-config="subscription_id=${ARM_SUBSCRIPTION_ID}" \
+            -backend-config="tenant_id=${ARM_TENANT_ID}"
+          terraform apply -input=false tfplan

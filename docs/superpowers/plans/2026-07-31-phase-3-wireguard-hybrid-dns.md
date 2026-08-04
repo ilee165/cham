@@ -108,7 +108,7 @@ Expected: kernel is 6.6.x (wireguard in-kernel: `modprobe wireguard` succeeds or
 
 ### Task 3: Bring the tunnel up and verify L3 both directions
 
-*Depends on Tasks 1 and 2. Requires `enable_test_vm = true` applied (Phase 2 Task 5 Step 4) for the spoke checks.*
+*Depends on Tasks 1 and 2. Requires the relevant per-spoke test VM and NIC flags applied through an approved saved plan for the spoke checks.*
 
 - [ ] **Step 1: Up + handshake**
 
@@ -251,12 +251,13 @@ git commit -m "docs: phase 3 complete — tunnel up, bidirectional hybrid resolu
 
 ### Task 7 (OPTIONAL, timeboxed ~$2): Private Resolver flag session
 
-*Any time after Task 5. This exercises the ADR-001 "flag flip is the migration" story. Skip freely; it gates nothing.*
+*Any time after Task 5. This validates the prewired managed resolver path without changing the current hub-BIND client design. Skip freely; it gates nothing.*
 
-- [ ] **Step 1:** Set a phone timer for 3 hours (runbook rule). Set `enable_private_resolver = true` in tfvars; `terraform apply`. Expected: 7 resolver resources added; output `resolver_inbound_ip` populated.
+- [ ] **Step 1:** Set a phone timer for 3 hours (runbook rule). Set `enable_private_resolver = true` in tfvars, generate a fresh saved plan, inspect its complete delta and SHA-256, and stop for explicit approval before applying that exact artifact. Expected after approval/apply: 12 resolver-module resources (including three forwarding-ruleset VNet links plus the inbound return route table and association) plus the gated hub NSG update; output `resolver_inbound_ip` populated.
 - [ ] **Step 2:** In SpatiumDDI, temporarily repoint the `azure.dwsolution.co` forward zone's forwarder from `172.16.0.1` to the `resolver_inbound_ip` value. Verify `dig +short @localhost db.azure.dwsolution.co` still answers `10.10.4.20` — now via the managed resolver.
-- [ ] **Step 3:** Screenshot the portal resources + capture `dig` output to `docs/evidence/phase3/resolver-session.txt`.
-- [ ] **Step 4:** Repoint the forwarder back to `172.16.0.1`; set `enable_private_resolver = false`; `terraform apply`. Verify: `az resource list -g rg-cham-lab --query "[?contains(name,'dnspr')]" -o table` → empty. Confirm the timer is cancelled.
+- [ ] **Step 3:** From a spoke, explicitly query Azure-provided DNS (`dig @168.63.129.16 printer.lab.dwsolution.co`) and verify the ruleset/outbound endpoint reaches on-premises DNS. The spoke VNet remains configured with the hub BIND VM, so ordinary client queries do not use the ruleset merely because the VNet link exists.
+- [ ] **Step 4:** Screenshot the portal resources + capture both directions' `dig` output to `docs/evidence/phase3/resolver-session.txt`.
+- [ ] **Step 5:** Repoint the forwarder back to `172.16.0.1`; set `enable_private_resolver = false`; generate and separately approve the exact saved removal plan before applying it. Verify: `az resource list -g rg-cham-lab --query "[?contains(name,'dnspr')]" -o table` → empty. Confirm the timer is cancelled.
 
 ---
 
@@ -272,4 +273,4 @@ git commit -m "docs: phase 3 complete — tunnel up, bidirectional hybrid resolu
 
 ## What Completion Looks Like
 
-Two DNS planes behave as one: any record SpatiumDDI knows — including ones that exist only because a device took a DHCP lease seconds ago — answers inside Azure spokes, and every Azure private record (seeded or auto-registered) answers on the laptop, all across an encrypted tunnel whose only manual step per rebuild is one key install documented in the runbook. The demo is a single split-screen: `resolvectl query printer.lab...` on a spoke VM next to `dig db.azure...` on the laptop, both answering, `wg show` underneath. The optional resolver session leaves before/after evidence that the managed-service migration is a one-flag change (ADR-001 proven, not just asserted).
+Two DNS planes behave as one: any record SpatiumDDI knows — including ones that exist only because a device took a DHCP lease seconds ago — answers inside Azure spokes, and every Azure private record (seeded or auto-registered) answers on the laptop, all across an encrypted tunnel whose only manual step per rebuild is one key install documented in the runbook. The demo is a single split-screen: `resolvectl query printer.lab...` on a spoke VM next to `dig db.azure...` on the laptop, both answering, `wg show` underneath. The optional resolver session leaves before/after evidence that both managed directions work and records the additional client-DNS change required for a full cutover.
