@@ -1,0 +1,4 @@
+# Normalize text files to LF in blobs; checkout per platform default.
+# Added after a review flagged apparent CRLF/trailing-whitespace README
+# changes that traced to client-side autocrlf, not blob content.
+* text=auto
