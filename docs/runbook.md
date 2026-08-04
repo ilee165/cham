@@ -15,9 +15,12 @@
 
 ## Session start
 1. `cd spatium && docker compose up -d` (laptop stack)
-2. Set all four per-spoke VM/NIC flags explicitly to the intended state. For
-   the current documented partial state: app VM/NIC `true`, management NIC
-   `true`, management VM `false`; keep the resolver `false`.
+2. Set all four per-spoke VM/NIC flags explicitly, deriving them from
+   refreshed Terraform state and `.continue-here.md` — never from a
+   remembered or historical shape (a stale recipe here once implied
+   deleting a live VM). After the East US 2 Checkpoint C completion the
+   live topology has both test VMs and both NICs present (all four flags
+   `true`); keep the resolver `false`.
 3. Generate a saved plan and review its complete delta and SHA-256. Locally,
    use `terraform plan -out=tfplan`; in CI, manually dispatch `plan.yml` on the
    current `main` commit. A merge never applies infrastructure.
