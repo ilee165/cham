@@ -4,9 +4,20 @@ variable "location" {
 }
 
 variable "vm_size" {
-  description = "Azure VM SKU for the hub BIND9/WireGuard appliance."
+  description = "Azure VM SKU for the hub BIND9/WireGuard appliance. Must support the controller chosen in disk_controller_type."
   type        = string
   default     = "Standard_D2als_v7"
+}
+
+variable "disk_controller_type" {
+  description = "Disk controller for the hub VM. Must match what vm_size supports: the v7 AMD families this lab can obtain (D*als_v7, F*als_v7) are NVMe-only, while B-series and most v5/v6 sizes are SCSI-only or SCSI-default. A mismatch plans cleanly and fails at Azure apply, and cross-controller changes require VM redeployment."
+  type        = string
+  default     = "NVMe"
+
+  validation {
+    condition     = contains(["SCSI", "NVMe"], var.disk_controller_type)
+    error_message = "disk_controller_type must be \"SCSI\" or \"NVMe\"."
+  }
 }
 
 variable "resource_group_name" { type = string }
