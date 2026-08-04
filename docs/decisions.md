@@ -7,9 +7,16 @@ interview material as much as documentation.
 - **Context:** Hybrid resolution needs a forwarder in the hub. Private
   Resolver is the managed answer at ~$180/mo per endpoint (~$360 both ways);
   a small VM used only during bounded lab sessions has materially lower cost.
-- **Decision:** BIND9 on a parameterized B2ats v2 hub VM in North Central US;
-  Private Resolver remains flag-gated. The VM choice matches current
-  subscription availability, but no free-service entitlement is assumed.
+- **Decision:** BIND9 on a parameterized small hub VM; Private Resolver
+  remains flag-gated. No free-service entitlement is assumed.
+- **Amended 2026-08-03:** the original B2ats v2 / North Central US sizing is
+  superseded. NCUS could not supply six regional cores (terminal
+  `ResourceNotAvailableForOffer`) nor any usable one-vCPU SKU, and this
+  subscription gets no x86 B-family SKU in any probed region. The lab now
+  runs in East US 2 on NVMe-only v7 sizes — `Standard_D2als_v7` hub,
+  `Standard_F1als_v7` test VMs (evidence: `docs/evidence/phase2/`). The
+  core decision — BIND9 on a VM instead of the managed resolver — is
+  unchanged.
 - **Tradeoff accepted:** we own patching, HA (none — single VM), and zone
   redundancy that the managed service would provide. Right call at lab
   scale. The flag provisions a testable managed resolver path, but the current

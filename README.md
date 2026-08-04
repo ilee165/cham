@@ -31,10 +31,15 @@ the lab, both answers managed here.
 | `docs` | Architecture, ADRs, runbook |
 
 ## Cost posture
-Core network objects have no fixed charge. Phase 2 uses a parameterized
-B2ats v2 VM in North Central US and is intended to be applied for a bounded
-verification session, then destroyed the same day. Free-account benefits are
-not assumed. Azure DNS Private Resolver (~$360/mo both endpoints) is
+Core network objects have no fixed charge. Phase 2 runs in East US 2 with a
+parameterized `Standard_D2als_v7` hub VM and two `Standard_F1als_v7` test
+VMs (the original North Central US B-series design was superseded by
+subscription capacity — see the ADR-001 amendment and
+`docs/evidence/phase2/`). VMs run only inside bounded verification windows
+and are deallocated otherwise; while the stack is retained between phases,
+the managed disks, hub static public IP, and Private DNS accrue small
+charges (~cents/day) until a separately approved destroy. Free-account
+benefits are not assumed. Azure DNS Private Resolver (~$360/mo both endpoints) is
 `count`-gated behind `enable_private_resolver` and used only in explicitly
 approved prorated sessions. CI never applies on merge: pull requests run only
 credential-free static checks, while a manual `plan.yml` run on `main`
