@@ -54,6 +54,15 @@ variable "onprem_address_space" {
     )
     error_message = "onprem_address_space must be an IPv4 CIDR like 10.20.0.0/16 — it renders into BIND ACLs, WireGuard AllowedIPs, NSG prefixes, and spoke UDRs, where a typo becomes a boot-time BIND failure instead of a plan error."
   }
+
+  validation {
+    condition = anytrue([
+      for block in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] :
+      tonumber(split("/", var.onprem_address_space)[1]) >= tonumber(split("/", block)[1]) &&
+      try(cidrsubnet(format("%s/%s", split("/", var.onprem_address_space)[0], split("/", block)[1]), 0, 0) == block, false)
+    ]) && tonumber(split("/", var.onprem_address_space)[1]) <= 30
+    error_message = "onprem_address_space must be an RFC1918 subnet no smaller than /30 — this value becomes an allowed source for TCP/UDP 53 on the hub's public-IP VM and is rendered into BIND allow-query/allow-recursion, so a public or over-broad range (e.g. 0.0.0.0/0) would expose an open recursive resolver."
+  }
 }
 
 variable "onprem_dns_ip" {
@@ -89,6 +98,15 @@ variable "wg_transfer_cidr" {
       can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.wg_transfer_cidr))
     )
     error_message = "wg_transfer_cidr must be an IPv4 CIDR like 172.16.0.0/24 — the WireGuard interface address is derived from it and it renders into BIND ACLs and NSG prefixes."
+  }
+
+  validation {
+    condition = anytrue([
+      for block in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] :
+      tonumber(split("/", var.wg_transfer_cidr)[1]) >= tonumber(split("/", block)[1]) &&
+      try(cidrsubnet(format("%s/%s", split("/", var.wg_transfer_cidr)[0], split("/", block)[1]), 0, 0) == block, false)
+    ]) && tonumber(split("/", var.wg_transfer_cidr)[1]) >= 16 && tonumber(split("/", var.wg_transfer_cidr)[1]) <= 30 && can(cidrhost(var.wg_transfer_cidr, 2))
+    error_message = "wg_transfer_cidr must be an RFC1918 subnet between /16 and /30 with at least two usable hosts — it feeds the hub's public-facing DNS ACLs and NSG allow rules (so public/over-broad ranges would open the resolver), and the derived WireGuard endpoint (.1) and peer (.2) must both exist inside it."
   }
 }
 
@@ -155,5 +173,10 @@ variable "budget_start_date" {
   validation {
     condition     = can(regex("^[0-9]{4}-[0-9]{2}-01T00:00:00(Z|[+]00:00)$", var.budget_start_date))
     error_message = "budget_start_date must be UTC midnight on the FIRST of a month, e.g. 2026-08-01T00:00:00Z — Azure rejects any other start_date at apply time with an opaque error, so catch it at plan time."
+  }
+
+  validation {
+    condition     = can(formatdate("YYYY-MM-DD", var.budget_start_date))
+    error_message = "budget_start_date must parse as a real RFC3339 timestamp — the first-of-month regex alone still accepts impossible calendar dates such as 2026-13-01T00:00:00Z."
   }
 }
