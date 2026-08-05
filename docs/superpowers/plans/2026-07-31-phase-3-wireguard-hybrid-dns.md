@@ -576,7 +576,9 @@ up, then uses the exact-address port override rehearsed in Checkpoint A.
 Bring up laptop `wg0`, start the native-Debian `dns-bind9` service with the
 exact `172.16.0.2:53` TCP/UDP override, and require:
 
-- a recent handshake on both peers and increasing transfer counters;
+- a recent handshake on both peers and increasing transfer counters; read the
+  local timestamp with `cut -f2` so PowerShell-to-WSL quoting cannot consume an
+  `awk` field expression;
 - laptop-to-hub and hub-to-laptop transfer-address reachability;
 - exact listener/container identity and a hub-originated UDP/TCP query to
   `172.16.0.2:53` returning the expected on-premises answer;
@@ -586,7 +588,28 @@ exact `172.16.0.2:53` TCP/UDP override, and require:
 - laptop internet egress remains the home path, compared as a boolean without
   recording either public IP.
 
-Run both the direct and composed forward paths explicitly:
+Read and validate the local handshake timestamp without emitting the peer key:
+
+```powershell
+$localHandshakeEpoch = @(
+  wsl.exe -d Debian -u root -- bash -lc `
+    'wg show wg0 latest-handshakes | cut -f2'
+)
+if ($LASTEXITCODE -ne 0 -or $localHandshakeEpoch.Count -ne 1 -or
+    $localHandshakeEpoch[0] -notmatch '^[1-9][0-9]*$') {
+  throw 'Local WireGuard handshake timestamp is absent or invalid.'
+}
+$localHandshakeAgeSeconds =
+  [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [long]$localHandshakeEpoch[0]
+if ($localHandshakeAgeSeconds -lt 0 -or $localHandshakeAgeSeconds -gt 120) {
+  throw 'Local WireGuard handshake is not recent.'
+}
+```
+
+Do not print `$localHandshakeEpoch` or raw `wg show` output. Independently
+require the hub peer timestamp to be nonzero and no more than 120 seconds old.
+
+Run both the direct and composed database-forward paths explicitly:
 
 ```bash
 # Debian WSL2: direct hub BIND path
@@ -594,7 +617,7 @@ dig +time=2 +tries=1 @172.16.0.1 db.azure.dwsolution.co
 dig +tcp +time=2 +tries=1 @172.16.0.1 db.azure.dwsolution.co
 
 # Debian WSL2: Spatium conditional-forward path
-for name in db.azure.dwsolution.co vm-test-app.azure.dwsolution.co; do
+for name in db.azure.dwsolution.co; do
   dig +time=2 +tries=1 @172.16.0.2 "$name"
   dig +tcp +time=2 +tries=1 @172.16.0.2 "$name"
 done
@@ -610,6 +633,8 @@ ssh.exe -i "$SSH_KEY" -o IdentitiesOnly=yes "labadmin@$HUB_IP" `
 
 The Azure queries must return `10.10.4.20`; both reverse queries must match the
 current Phase 1 lease-backed answer. A UDP pass cannot substitute for TCP.
+Do not query `vm-test-app.azure.dwsolution.co` in this hub-only gate: its
+auto-registration check belongs after the deallocated app VM starts in 2.5.
 
 Raw `wg show` includes public keys/endpoints and must not be committed. Record
 only handshake freshness, nonzero-transfer booleans, and test results.
@@ -626,6 +651,20 @@ az vm start --resource-group rg-cham-lab --name vm-test-app
 
 Require `vm-test-mgmt` to remain `VM deallocated`. Obtain the app private IP
 from `terraform output -raw testvm_app_ip`.
+
+After Azure reports `vm-test-app` as `VM running`, poll its auto-registered
+`vm-test-app.azure.dwsolution.co` name through Spatium every five seconds for
+no more than 120 seconds. Require both UDP and TCP queries to `@172.16.0.2` to
+return the app private IP before continuing:
+
+```bash
+dig +time=2 +tries=1 @172.16.0.2 vm-test-app.azure.dwsolution.co
+dig +tcp +time=2 +tries=1 @172.16.0.2 vm-test-app.azure.dwsolution.co
+```
+
+Absence while the app was deallocated is not a failure. Failure to observe the
+matching auto-registered address after the bounded post-start poll is a
+Checkpoint B failure and triggers mandatory closeout.
 
 The retained app image has no Terraform/cloud-init guarantee that `dig` is
 installed. Through Windows OpenSSH + ProxyJump, require it or install
@@ -644,8 +683,9 @@ Prove:
 
 - laptop reaches the app private IP through WireGuard/hub forwarding and the
   app returns through its UDR;
-- laptop resolves both `db.azure.dwsolution.co` and the auto-registered
-  `vm-test-app.azure.dwsolution.co` through Spatium;
+- laptop resolves `db.azure.dwsolution.co` and, after the post-start
+  auto-registration gate above, `vm-test-app.azure.dwsolution.co` through
+  Spatium over both UDP and TCP;
 - hub BIND9 resolves `printer.lab.dwsolution.co` through `172.16.0.2`;
 - app `resolvectl` and explicit UDP/TCP `dig @10.10.0.10` resolve the same
   on-premises record; and
