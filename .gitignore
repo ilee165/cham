@@ -26,3 +26,6 @@ dist/
 
 # OS
 .DS_Store
+
+# graphify knowledge-graph output (local tooling artifact)
+graphify-out/
