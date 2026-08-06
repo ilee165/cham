@@ -160,3 +160,35 @@ def test_subprocess_entrypoint_contract():
         capture_output=True, text=True, check=False)
     assert result.returncode == 1
     assert "error:" in result.stderr
+
+
+def test_bad_flag_exits_1_not_2(capsys):
+    """argparse's default usage-error exit code (2) collides with the
+    drift-found contract; usage errors must exit 1 instead."""
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["--bogus-flag"])
+    assert exc_info.value.code == 1
+    assert "error:" in capsys.readouterr().err
+
+
+def test_export_empty_string_is_not_a_noop(files, capsys):
+    """--export "" must not silently fall through to returning 0 despite
+    never exporting; it should enter the export branch and fail loudly."""
+    config, desired = files
+    code = cli.main(["--export", "", "--config", str(config),
+                     "--desired-from-file", str(desired)])
+    assert code == 1
+    assert "error:" in capsys.readouterr().err
+
+
+def test_missing_azure_env_var_gives_clear_error(files, monkeypatch, capsys):
+    """A missing required env var should render as a clear operational
+    error, not a bare KeyError repr — and must fire before any Azure SDK
+    import (env read happens before AzureProvider() construction)."""
+    config, desired = files
+    monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
+    code = cli.main(["--dry-run", "--config", str(config),
+                     "--desired-from-file", str(desired)])
+    assert code == 1
+    assert ("missing required environment variable: AZURE_SUBSCRIPTION_ID"
+            in capsys.readouterr().err)

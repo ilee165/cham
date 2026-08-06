@@ -48,6 +48,17 @@ def _fetch_desired(config: Config, args: argparse.Namespace) -> list[CanonicalRe
     return spatium.fetch_desired({edge.zone for edge in config.edges})
 
 
+class _ArgumentParser(argparse.ArgumentParser):
+    """argparse exits 2 on usage errors by default, which collides with this
+    CLI's exit-code contract (2 == drift found). Usage errors are an
+    operational error (1), not drift."""
+
+    def error(self, message: str) -> None:
+        self.print_usage(sys.stderr)
+        print(f"{self.prog}: error: {message}", file=sys.stderr)
+        raise SystemExit(1)
+
+
 def _print_diff(edge_name: str, diff: Diff) -> None:
     for r in sorted(diff.to_add, key=lambda r: r.key):
         print(f"[{edge_name}] ADD    {r.name} {r.rtype} {','.join(r.values)} ttl={r.ttl}")
@@ -62,7 +73,7 @@ def _print_diff(edge_name: str, diff: Diff) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
+    parser = _ArgumentParser(
         prog="cham-reconcile",
         description="Converge DNS edges toward SpatiumDDI truth")
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -80,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config(Path(args.config))
 
-        if args.export:
+        if args.export is not None:
             records = _fetch_desired(config, args)
             save_desired(records, Path(args.export))
             print(f"exported {len(records)} records to {args.export}")
@@ -110,7 +121,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"summary: {adds} add, {updates} update, {deletes} delete "
               f"across {len(edges)} edge(s){applied}")
         return 2 if (args.dry_run and drifted) else 0
-    except (ConfigError, ConvergenceError, KeyError, OSError, RuntimeError, ValueError) as exc:
+    except KeyError as exc:
+        print(f"error: missing required environment variable: {exc.args[0]}", file=sys.stderr)
+        return 1
+    except (ConfigError, ConvergenceError, OSError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
