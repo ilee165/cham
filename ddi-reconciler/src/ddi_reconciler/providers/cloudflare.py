@@ -8,28 +8,94 @@ into per-record calls using that index. apply() therefore requires a
 fetch_actual() earlier in the same run (the runner's plan-then-apply
 ordering guarantees it).
 
+Three consequences of that shape are load-bearing here:
+
+* TTL is stored per API record, so an RRset can hold several TTLs. The model
+  carries one TTL per RRset, so a split is reported as _SPLIT_TTL — always
+  drift — and apply() normalizes every record in the set (CR-5).
+* Two records cannot coexist at one name for a single-valued type, so CNAME is
+  retargeted in place; every other type keeps create-before-delete, whose
+  failure window over-serves rather than under-serves (CR-2).
+* TXT content crosses the wire in DNS presentation form ("a" "b"), so reads
+  decode it and writes encode it — they are inverses (WR-13).
+
+The provider is bound to exactly one zone and refuses to read or write any
+other, whatever the caller passes (CR-4).
+
 Token: scoped API token — Zone.Zone:Read + Zone.DNS:Edit on this zone only.
 """
 from __future__ import annotations
 
-import ipaddress
+import sys
+from collections.abc import Iterable
+from urllib.parse import quote
+
 import requests
 
-from ddi_reconciler.model import SUPPORTED_RECORD_TYPES, CanonicalRecord, Diff
+from ddi_reconciler.model import (
+    SUPPORTED_RECORD_TYPES,
+    CanonicalRecord,
+    Diff,
+    RecordKey,
+    RecordUpdate,
+    canonical_name,
+    canonical_record_key,
+    canonical_value,
+)
 
 API = "https://api.cloudflare.com/client/v4"
 _TIMEOUT = 10
+_PER_PAGE = 100
+# Nothing legitimate reaches this; it exists so a pathological API can never
+# spin the pagination loop forever.
+_MAX_PAGES = 1000
+
+# Cloudflare accepts ttl=1 ("automatic") or 60..86400 and rejects anything else
+# with a 400 that never names TTL as the cause.
+_TTL_AUTOMATIC = 1
+_TTL_MIN, _TTL_MAX = 60, 86400
+
+# Reported as the RRset TTL when Cloudflare's per-record TTLs disagree. The
+# model carries a single TTL per RRset, so the split has to be encoded in that
+# one scalar: this is the DNS maximum, far above anything Cloudflare will store
+# (86400), so it can never collide with a TTL actually served at this edge and
+# it always reads as drift against a TTL this edge could accept.
+_SPLIT_TTL = 2147483647
+
+# Types where two records cannot coexist at one owner name. DNS forbids a
+# second CNAME at a name and Cloudflare enforces it (error 81053), so a
+# create-before-delete retarget can never converge. Every other supported type
+# is a real multi-value RRset and KEEPS create-before-delete.
+_SINGLE_VALUE_TYPES = frozenset({"CNAME"})
+
+_RECORD_FIELDS = frozenset({"id", "type", "name", "content", "ttl"})
 
 
 class CloudflareProvider:
-    def __init__(self, zone_name: str, api_token: str):
-        self.zone_name = zone_name.strip().rstrip(".").lower()
+    def __init__(self, zone_name: str, api_token: str,
+                 managed_keys: Iterable[RecordKey] | None = None):
+        # Same canonicalizer config.py and the model use, so the zone this
+        # provider is bound to and the zone a record claims are one identity.
+        self.zone_name = canonical_name(zone_name)
+        # The ownership allowlist, when the caller knows it. It only decides
+        # whether an edge record this adapter cannot parse is fatal (a managed
+        # record must never be silently skipped) or ignorable. None = the
+        # caller did not say, so unparseable records are skipped and surfaced.
+        self.managed_keys: frozenset[RecordKey] | None = (
+            None if managed_keys is None
+            else frozenset(canonical_record_key(z, n, t) for z, n, t in managed_keys))
         self._session = requests.Session()
         self._session.headers["Authorization"] = f"Bearer {api_token}"
         self._zone_id: str | None = None
-        self._api_records: dict[tuple[str, str, str], list[dict]] = {}
+        self._api_records: dict[RecordKey, list[dict]] = {}
+        # Edge records fetch_actual() could not represent, kept for the report.
+        self.skipped: list[tuple[RecordKey, str]] = []
 
     # --- plumbing -----------------------------------------------------------
+    @staticmethod
+    def _warn(message: str) -> None:
+        print(f"warning: {message}", file=sys.stderr)
+
     def _request(self, method: str, path: str, **kwargs) -> dict:
         try:
             resp = self._session.request(method, f"{API}{path}", timeout=_TIMEOUT, **kwargs)
@@ -42,113 +108,332 @@ class CloudflareProvider:
         return body
 
     def _zone(self) -> str:
+        """The zone id, verified to belong to this provider's zone name.
+
+        Every read and every DELETE is scoped by this id, so accepting
+        result[0] blindly would let a mismatched or multi-zone response
+        silently retarget a destructive tool at somebody else's zone.
+        """
         if self._zone_id is None:
-            result = self._request("GET", f"/zones?name={self.zone_name}")["result"]
-            if not result:
-                raise RuntimeError(f"cloudflare API error: zone not found: {self.zone_name}")
-            self._zone_id = result[0]["id"]
+            # The name is config-controlled and interpolated into a query
+            # string; encode it so it cannot smuggle extra query parameters.
+            body = self._request("GET", f"/zones?name={quote(self.zone_name, safe='')}")
+            result = body.get("result")
+            if not isinstance(result, list):
+                raise RuntimeError(
+                    f"cloudflare API error: zone lookup for {self.zone_name!r} returned no "
+                    "result list")
+            exact = [z for z in result
+                     if isinstance(z, dict) and canonical_name(str(z.get("name", "")))
+                     == self.zone_name]
+            if len(exact) != 1:
+                raise RuntimeError(
+                    f"cloudflare API error: expected exactly one zone named "
+                    f"{self.zone_name!r}, got "
+                    f"{[z.get('name') if isinstance(z, dict) else z for z in result]}")
+            zone_id = exact[0].get("id")
+            if not isinstance(zone_id, str) or not zone_id:
+                raise RuntimeError(
+                    f"cloudflare API error: zone {self.zone_name!r} carries no usable id")
+            self._zone_id = zone_id
         return self._zone_id
 
     def _relative(self, fqdn: str) -> str:
-        fqdn = fqdn.rstrip(".").lower()
-        if fqdn == self.zone_name:
+        name = canonical_name(fqdn)
+        if name == self.zone_name:
             return "@"
         suffix = "." + self.zone_name
-        return fqdn[: -len(suffix)] if fqdn.endswith(suffix) else fqdn
+        return name[: -len(suffix)] if name.endswith(suffix) else name
 
     def _fqdn(self, name: str) -> str:
         return self.zone_name if name == "@" else f"{name}.{self.zone_name}"
 
+    def _require_zone(self, record: CanonicalRecord) -> None:
+        """A provider bound to one zone must never act on a record that claims
+        another one — the allowlist is a (zone, name, rtype) key, so getting
+        the zone wrong publishes an allowlisted key into an unowned zone."""
+        if record.zone != self.zone_name:
+            raise RuntimeError(
+                f"cloudflare provider is bound to zone {self.zone_name!r} and refuses to "
+                f"touch {'/'.join(record.key)}, which belongs to another zone")
+
+    def _owns(self, key: RecordKey) -> bool:
+        return self.managed_keys is not None and key in self.managed_keys
+
+    def _may_own(self, key: RecordKey) -> bool:
+        """True unless the caller told us this key is somebody else's. Keeps
+        warnings about a zone's other records from drowning out our own."""
+        return self.managed_keys is None or key in self.managed_keys
+
+    # --- TXT presentation form ----------------------------------------------
     @staticmethod
-    def _content(raw: dict) -> str:
-        content = raw["content"]
-        if raw["type"].upper() == "TXT" and len(content) >= 2 and content[0] == content[-1] == '"':
-            content = content[1:-1]  # the API returns TXT content quoted
-        return content
+    def _txt_decode(content: str) -> str:
+        """DNS presentation form -> payload.
+
+        TXT crosses the wire as one or more quoted character-strings with
+        backslash escapes ("a" "b"), and Cloudflare splits anything over 255
+        bytes into several of them, so stripping the outer pair mangles long
+        DKIM values. Concatenate them the way resolvers do. Content that is
+        not well-formed presentation form is already opaque and passes through.
+        """
+        parts: list[str] = []
+        index, end = 0, len(content)
+        while index < end:
+            if content[index] == " ":  # separator between character-strings
+                index += 1
+                continue
+            if content[index] != '"':
+                return content
+            index += 1
+            buffer: list[str] = []
+            closed = False
+            while index < end:
+                char = content[index]
+                if char == "\\" and index + 1 < end:
+                    buffer.append(content[index + 1])
+                    index += 2
+                    continue
+                if char == '"':
+                    closed = True
+                    index += 1
+                    break
+                buffer.append(char)
+                index += 1
+            if not closed:
+                return content  # unterminated: not presentation form
+            parts.append("".join(buffer))
+        return "".join(parts) if parts else content
+
+    @staticmethod
+    def _txt_encode(value: str) -> str:
+        """Payload -> DNS presentation form. Inverse of _txt_decode, so a value
+        written here reads back as itself instead of drifting forever."""
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+
+    @classmethod
+    def _content(cls, raw: dict) -> str:
+        content = str(raw["content"])
+        return cls._txt_decode(content) if str(raw["type"]).upper() == "TXT" else content
+
+    @classmethod
+    def _wire_content(cls, rtype: str, value: str) -> str:
+        if rtype != "TXT":
+            return value
+        if cls._txt_decode(value) != value:
+            cls._warn(
+                f"TXT value {value!r} is already in DNS presentation form; its quotes are "
+                "published as literal payload, because the model treats TXT content as "
+                "opaque. Truth should carry the unquoted string.")
+        return cls._txt_encode(value)
 
     @staticmethod
     def _match_key(rtype: str, content: str) -> str:
-        # Mirror CanonicalRecord's domain-value normalization so canonical
-        # values can look up raw API records regardless of case/trailing dot.
-        # CNAME/PTR: lowercase and strip trailing dot.
-        # AAAA: normalize IPv6 via ipaddress.IPv6Address (canonical form).
-        if rtype in {"CNAME", "PTR"}:
-            return content.rstrip(".").lower()
-        elif rtype == "AAAA":
-            try:
-                return str(ipaddress.IPv6Address(content))
-            except ValueError:
-                # Invalid IPv6; fall back to raw content to avoid crashing fetch-only paths
-                return content
-        else:
-            return content
+        """Index key for a raw API record's content.
+
+        Must be exactly the normalization CanonicalRecord applies, or canonical
+        values cannot find the raw records they came from — so call the model's
+        own canonicalizer rather than mirroring it.
+        """
+        try:
+            return canonical_value(rtype, content)
+        except ValueError:
+            return content  # unparseable at the edge: index it verbatim
+
+    @staticmethod
+    def _ttl_of(raw: dict) -> int:
+        try:
+            return int(raw["ttl"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"cloudflare API error: record {raw.get('id')!r} carries an unusable "
+                f"ttl {raw.get('ttl')!r}") from exc
+
+    @staticmethod
+    def _check_ttl(record: CanonicalRecord) -> None:
+        if record.ttl != _TTL_AUTOMATIC and not (_TTL_MIN <= record.ttl <= _TTL_MAX):
+            raise RuntimeError(
+                f"cloudflare rejects ttl={record.ttl} for {'/'.join(record.key)}: use "
+                f"{_TTL_AUTOMATIC} (automatic) or {_TTL_MIN}-{_TTL_MAX}")
 
     # --- provider contract --------------------------------------------------
-    def fetch_actual(self, zones: set[str]) -> list[CanonicalRecord]:
-        zone_id = self._zone()
+    def _all_dns_records(self, zone_id: str) -> list[dict]:
+        """Every DNS record in the zone, or an error — never a truncated read.
+
+        A short read makes records this tool owns invisible: they are neither
+        updated nor deleted, the diff reports converged, and a managed record
+        on an unread page is re-created as a duplicate. So a response without a
+        usable page count is read until a page comes back empty rather than
+        assumed to be page 1 of 1.
+        """
         raw_records: list[dict] = []
         page = 1
         while True:
             body = self._request(
-                "GET", f"/zones/{zone_id}/dns_records?per_page=100&page={page}")
-            raw_records.extend(body["result"])
-            if page >= body.get("result_info", {}).get("total_pages", 1):
+                "GET", f"/zones/{zone_id}/dns_records?per_page={_PER_PAGE}&page={page}")
+            result = body.get("result")
+            if not isinstance(result, list):
+                raise RuntimeError(
+                    f"cloudflare API error: dns_records page {page} carried no result list")
+            raw_records.extend(result)
+
+            info = body.get("result_info")
+            total_pages = info.get("total_pages") if isinstance(info, dict) else None
+            if isinstance(total_pages, bool) or not isinstance(total_pages, int):
+                if not result:
+                    break
+            elif page >= total_pages:
                 break
             page += 1
+            if page > _MAX_PAGES:
+                raise RuntimeError(
+                    "cloudflare API error: dns_records pagination did not terminate after "
+                    f"{_MAX_PAGES} pages")
+        return raw_records
+
+    def _rrset_ttl(self, key: RecordKey, ttls: set[int]) -> int:
+        if len(ttls) == 1:
+            return next(iter(ttls))
+        if self._may_own(key):
+            self._warn(
+                f"cloudflare RRset {'/'.join(key)} carries split per-record TTLs "
+                f"{sorted(ttls)}; the model holds one TTL per RRset, so it is reported as "
+                f"ttl={_SPLIT_TTL} (always drift) and every record in the set is "
+                "normalized to the desired TTL on apply")
+        return _SPLIT_TTL
+
+    def fetch_actual(self, zones: set[str]) -> list[CanonicalRecord]:
+        requested = {canonical_name(zone) for zone in zones}
+        if requested != {self.zone_name}:
+            raise RuntimeError(
+                f"cloudflare provider is bound to zone {self.zone_name!r} but was asked to "
+                f"fetch {sorted(requested)}")
+        zone_id = self._zone()
+        raw_records = self._all_dns_records(zone_id)
 
         self._api_records.clear()
-        grouped: dict[tuple[str, str, str], dict] = {}
+        self.skipped.clear()
+        grouped: dict[RecordKey, dict] = {}
         for raw in raw_records:
-            rtype = raw["type"].upper()
+            if not isinstance(raw, dict) or not _RECORD_FIELDS <= raw.keys():
+                raise RuntimeError(
+                    f"cloudflare API error: malformed dns_record payload: {raw!r}")
+            rtype = str(raw["type"]).upper()
             if rtype not in SUPPORTED_RECORD_TYPES:
                 continue
-            key = (self.zone_name, self._relative(raw["name"]), rtype)
+            key = (self.zone_name, self._relative(str(raw["name"])), rtype)
             self._api_records.setdefault(key, []).append(raw)
-            entry = grouped.setdefault(key, {"values": [], "ttl": int(raw["ttl"])})
+            entry = grouped.setdefault(key, {"values": [], "ttls": set()})
             entry["values"].append(self._content(raw))
-        return [
-            CanonicalRecord(zone=z, name=n, rtype=t,
-                            values=tuple(e["values"]), ttl=e["ttl"])
-            for (z, n, t), e in grouped.items()
-        ]
+            entry["ttls"].add(self._ttl_of(raw))
 
-    def _create(self, record: CanonicalRecord, value: str) -> None:
-        self._request("POST", f"/zones/{self._zone()}/dns_records", json={
+        records: list[CanonicalRecord] = []
+        for key, entry in grouped.items():
+            zone, name, rtype = key
+            # Canonicalize per record: the ownership filter runs downstream, in
+            # diff_records, so building the whole zone at once lets one record
+            # this tool explicitly disclaims abort the entire reconcile.
+            try:
+                records.append(CanonicalRecord(zone=zone, name=name, rtype=rtype,
+                                               values=tuple(entry["values"]),
+                                               ttl=self._rrset_ttl(key, entry["ttls"])))
+            except ValueError as exc:
+                if self._owns(key):
+                    raise RuntimeError(
+                        f"cloudflare API state error: managed record {zone}/{name}/{rtype} "
+                        f"is malformed at the edge: {exc}") from exc
+                self.skipped.append((key, str(exc)))
+                self._api_records.pop(key, None)
+                self._warn(
+                    f"skipping cloudflare record {zone}/{name}/{rtype}, which this "
+                    f"reconciler does not own and cannot represent: {exc}")
+        return records
+
+    def _create(self, zone_id: str, record: CanonicalRecord, value: str) -> None:
+        self._require_zone(record)
+        self._check_ttl(record)
+        self._request("POST", f"/zones/{zone_id}/dns_records", json={
             "type": record.rtype, "name": self._fqdn(record.name),
-            "content": value, "ttl": record.ttl, "proxied": False,
+            "content": self._wire_content(record.rtype, value),
+            "ttl": record.ttl, "proxied": False,
         })
 
+    def _record(self, existing: dict[str, dict], value: str, key: RecordKey) -> dict:
+        """The raw API record carrying `value` — or an error that says which of
+        two very different causes applies."""
+        if value in existing:
+            return existing[value]
+        if not existing:
+            raise RuntimeError(
+                f"cloudflare API state error: no fetched records for {key}; "
+                f"apply() requires fetch_actual() in the same run")
+        raise RuntimeError(
+            f"cloudflare API state error: value {value!r} is not among the fetched records "
+            f"for {key}, which carry {sorted(existing)}; the edge changed after "
+            f"fetch_actual(), or its stored content does not canonicalize to this value")
+
+    def _apply_update(self, zone_id: str, update: RecordUpdate) -> None:
+        want, have = update.desired, update.actual
+        existing = {
+            self._match_key(want.rtype, self._content(raw)): raw
+            for raw in self._api_records.get(want.key, [])
+        }
+        added = sorted(set(want.values) - set(have.values))
+        removed = sorted(set(have.values) - set(want.values))
+
+        # Single-valued types: the replacement cannot be created alongside the
+        # record it replaces (Cloudflare rejects a second CNAME at a name with
+        # 81053), so create-before-delete aborts on the POST, the DELETE never
+        # runs, and the edge can never converge. Retarget in place instead —
+        # atomic, so the name never resolves to nothing and never to both.
+        if want.rtype in _SINGLE_VALUE_TYPES:
+            while added and removed:
+                old, new = removed.pop(0), added.pop(0)
+                raw = self._record(existing, old, want.key)
+                self._check_ttl(want)
+                self._request(
+                    "PATCH", f"/zones/{zone_id}/dns_records/{raw['id']}",
+                    json={"content": self._wire_content(want.rtype, new), "ttl": want.ttl})
+                existing.pop(old)
+
+        # Multi-value RRsets KEEP create-before-delete: the window between the
+        # two over-serves (the RRset briefly carries both values) instead of
+        # under-serving, which is the right trade for availability. Resolve the
+        # ids to delete first, so an index miss fails before anything is
+        # written rather than after the create has already gone out.
+        doomed = [self._record(existing, value, want.key) for value in removed]
+        for value in added:
+            self._create(zone_id, want, value)
+        for raw in doomed:
+            self._request("DELETE", f"/zones/{zone_id}/dns_records/{raw['id']}")
+
+        # TTL lives on the API record, not the RRset, so the RRset-level
+        # have.ttl can hide a record that disagrees. Decide per surviving
+        # record: everything else in the set was just written with want.ttl.
+        for value in sorted(set(want.values) & set(have.values)):
+            raw = self._record(existing, value, want.key)
+            if self._ttl_of(raw) != want.ttl:
+                self._check_ttl(want)
+                self._request("PATCH", f"/zones/{zone_id}/dns_records/{raw['id']}",
+                              json={"ttl": want.ttl})
+
     def apply(self, diff: Diff) -> None:
+        # Zone binding first, for every record in every branch: refusing after
+        # a partial write would be no protection at all.
+        for record in (*diff.to_add, *(u.desired for u in diff.to_update),
+                       *(u.actual for u in diff.to_update), *diff.to_delete):
+            self._require_zone(record)
         zone_id = self._zone()
         for record in diff.to_add:
             for value in record.values:
-                self._create(record, value)
+                self._create(zone_id, record, value)
         for update in diff.to_update:
-            want, have = update.desired, update.actual
-            existing = {
-                self._match_key(want.rtype, self._content(r)): r
-                for r in self._api_records.get(want.key, [])
-            }
-            for value in set(want.values) - set(have.values):
-                self._create(want, value)
-            for value in set(have.values) - set(want.values):
-                if value not in existing:
-                    raise RuntimeError(
-                        f"cloudflare API state error: value {value!r} not in fetched index for {want.key}; "
-                        f"apply() requires fetch_actual() in the same run")
-                self._request("DELETE", f"/zones/{zone_id}/dns_records/{existing[value]['id']}")
-            if want.ttl != have.ttl:
-                for value in set(want.values) & set(have.values):
-                    if value not in existing:
-                        raise RuntimeError(
-                            f"cloudflare API state error: value {value!r} not in fetched index for {want.key}; "
-                            f"apply() requires fetch_actual() in the same run")
-                    self._request("PATCH", f"/zones/{zone_id}/dns_records/{existing[value]['id']}",
-                                  json={"ttl": want.ttl})
+            self._apply_update(zone_id, update)
         for record in diff.to_delete:
-            if record.key not in self._api_records or not self._api_records[record.key]:
+            raws = self._api_records.get(record.key)
+            if not raws:
                 raise RuntimeError(
                     f"cloudflare API state error: no fetched records for {record.key}; "
                     f"apply() requires fetch_actual() in the same run")
-            for raw in self._api_records.get(record.key, []):
+            for raw in raws:
                 self._request("DELETE", f"/zones/{zone_id}/dns_records/{raw['id']}")
