@@ -9,7 +9,12 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from ddi_reconciler.model import RecordKey, canonical_name, canonical_record_key
+from ddi_reconciler.model import (
+    SUPPORTED_RECORD_TYPES,
+    RecordKey,
+    canonical_name,
+    canonical_record_key,
+)
 
 
 class ConfigError(ValueError):
@@ -68,6 +73,18 @@ def load_config(path: Path) -> Config:
             )
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             raise ConfigError(f"invalid edge entry {entry!r}: {exc}") from exc
+
+        # A record type the reconciler cannot represent manages nothing: the
+        # key never matches an edge record, the CLI prints SKIP, and the run
+        # exits 0 — so a typo ("CNMAE") or an unsupported type ("SRV") leaves
+        # the record silently unmanaged while nightly drift stays green.
+        unsupported = sorted({key[2] for key in managed_keys} - SUPPORTED_RECORD_TYPES)
+        if unsupported:
+            raise ConfigError(
+                f"edge {name!r}: managed_keys use unsupported record type(s) "
+                f"{unsupported}; supported types are {sorted(SUPPORTED_RECORD_TYPES)}. "
+                "An unsupported type manages nothing and would exit 0 having reconciled "
+                "nothing.")
 
         if provider not in {"azure", "cloudflare"}:
             raise ConfigError(f"unknown provider {provider!r} for edge {name!r}")

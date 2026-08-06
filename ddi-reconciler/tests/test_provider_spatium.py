@@ -150,6 +150,64 @@ def test_pagination_that_does_not_advance_is_fatal():
         SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
 
 
+# --- CR-1: a read that cannot be checked is unproven, not "probably whole" --
+
+@responses.activate
+def test_a_declared_total_the_adapter_checked_marks_the_read_verified():
+    responses.get(ZONES, json={"items": [{"id": 1, "name": "test.zone."}], "total": 1})
+    responses.get(RECORDS, json={"items": [rec("a"), rec("b", "10.0.0.2")], "total": 2})
+    provider = SpatiumProvider(BASE, token="t")
+    assert len(provider.fetch_desired({"test.zone"})) == 2
+    assert provider.read_verified is True
+
+
+@responses.activate
+def test_a_bare_list_body_leaves_the_read_unproven():
+    """Nothing in a bare list distinguishes 'that was everything' from 'the
+    server truncated it'. Downstream, the difference is a delete order."""
+    responses.get(ZONES, json=[{"id": 1, "name": "test.zone."}])
+    responses.get(RECORDS, json=[rec("a")])
+    provider = SpatiumProvider(BASE, token="t")
+    assert [r.name for r in provider.fetch_desired({"test.zone"})] == ["a"]
+    assert provider.read_verified is False
+
+
+@responses.activate
+def test_an_envelope_with_no_total_leaves_the_read_unproven():
+    responses.get(ZONES, json={"items": [{"id": 1, "name": "test.zone."}], "total": 1})
+    responses.get(RECORDS, json={"items": [rec("a")]})
+    provider = SpatiumProvider(BASE, token="t")
+    provider.fetch_desired({"test.zone"})
+    assert provider.read_verified is False
+
+
+@responses.activate
+def test_an_unproven_zone_listing_taints_the_whole_read():
+    """A zone that never arrives drops every record in it, so the records
+    endpoint declaring its own total is not enough."""
+    responses.get(ZONES, json=[{"id": 1, "name": "test.zone."}])
+    responses.get(RECORDS, json={"items": [rec("a")], "total": 1})
+    provider = SpatiumProvider(BASE, token="t")
+    provider.fetch_desired({"test.zone"})
+    assert provider.read_verified is False
+
+
+@responses.activate
+def test_one_unproven_page_among_verified_ones_taints_the_read():
+    responses.get(ZONES, json={"items": [{"id": 1, "name": "test.zone."},
+                                         {"id": 2, "name": "other.zone."}],
+                               "total": 2})
+    responses.get(RECORDS, json={"items": [rec("a")], "total": 1})
+    responses.get(f"{BASE}/api/v1/dns/zones/2/records", json=[rec("b", "10.0.0.2")])
+    provider = SpatiumProvider(BASE, token="t")
+    provider.fetch_desired({"test.zone", "other.zone"})
+    assert provider.read_verified is False
+
+
+def test_an_unread_provider_has_proven_nothing():
+    assert SpatiumProvider(BASE, token="t").read_verified is False
+
+
 # --- malformed payloads land on the exit contract, not on a traceback ------
 
 @responses.activate

@@ -124,6 +124,29 @@ def test_malformed_managed_key_is_config_error(tmp_path):
         load_config(path)
 
 
+@pytest.mark.parametrize("rtype", ["CNMAE", "SRV", "MX", ""])
+def test_unsupported_managed_key_record_type_rejected(tmp_path, rtype):
+    """A typo or an unsupported type loaded cleanly, matched nothing, printed
+    SKIP and exited 0 — so the record stayed unmanaged while nightly drift
+    stayed green."""
+    path = tmp_path / "config.toml"
+    path.write_text(VALID.replace(
+        'managed_keys = [["azure.dwsolution.co", "APP.", "a"]]',
+        f'managed_keys = [["azure.dwsolution.co", "app", "{rtype}"]]'))
+    with pytest.raises(ConfigError, match="unsupported record type"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("rtype", ["A", "AAAA", "CNAME", "PTR", "TXT", "txt"])
+def test_every_supported_record_type_still_loads(tmp_path, rtype):
+    path = tmp_path / "config.toml"
+    path.write_text(VALID.replace(
+        'managed_keys = [["azure.dwsolution.co", "APP.", "a"]]',
+        f'managed_keys = [["azure.dwsolution.co", "app", "{rtype}"]]'))
+    assert load_config(path).edges[0].managed_keys == frozenset(
+        {("azure.dwsolution.co", "app", rtype.upper())})
+
+
 def test_repo_config_toml_is_valid():
     from pathlib import Path
     repo_config = Path(__file__).parent.parent / "config.toml"

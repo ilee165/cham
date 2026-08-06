@@ -14,7 +14,7 @@ from pathlib import Path
 
 from ddi_reconciler.config import Config, ConfigError, EdgeConfig, load_config
 from ddi_reconciler.desired_file import load_desired, save_desired
-from ddi_reconciler.model import CanonicalRecord, Diff
+from ddi_reconciler.model import CanonicalRecord, Diff, RecordKey
 from ddi_reconciler.runner import apply_edge, plan_edge
 
 
@@ -54,7 +54,14 @@ def _build_providers(config: Config, edges: tuple[EdgeConfig, ...]) -> dict:
 
 
 def _fetch_desired(config: Config, args: argparse.Namespace,
-                   edges: tuple[EdgeConfig, ...]) -> list[CanonicalRecord]:
+                   edges: tuple[EdgeConfig, ...]) -> tuple[list[CanonicalRecord], bool]:
+    """(desired records, whether that read can be proven complete).
+
+    The second element is what runner.plan_edge gates deletions on, and both
+    truth sources answer it the same way: a snapshot verifies its own count and
+    checksum, the SpatiumDDI adapter checks a total the response declared.
+    Neither is allowed to answer "probably".
+    """
     if args.desired_from_file:
         return load_desired(Path(args.desired_from_file))
     from ddi_reconciler.providers.spatium import SpatiumProvider
@@ -62,7 +69,8 @@ def _fetch_desired(config: Config, args: argparse.Namespace,
                               token=os.environ.get("SPATIUM_API_TOKEN", ""))
     # Zones come from the *selected* edges: --edge should not require truth for
     # zones the run is not touching.
-    return spatium.fetch_desired({edge.zone for edge in edges})
+    records = spatium.fetch_desired({edge.zone for edge in edges})
+    return records, spatium.read_verified
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -76,27 +84,25 @@ class _ArgumentParser(argparse.ArgumentParser):
         raise SystemExit(1)
 
 
-def _ttl(value: int) -> str:
-    """Render a TTL for humans. The Cloudflare adapter reports a sentinel when
-    an RRset's per-record TTLs disagree — the model carries one TTL per RRset,
-    so the split has to ride in that scalar. Printing the raw number would just
-    puzzle the operator; name the condition instead."""
-    from ddi_reconciler.providers.cloudflare import _SPLIT_TTL
-    return "split" if value == _SPLIT_TTL else str(value)
-
-
 def _print_diff(edge_name: str, diff: Diff,
-                dropped: tuple[CanonicalRecord, ...] = ()) -> None:
+                dropped: tuple[CanonicalRecord, ...] = (),
+                split_ttl_keys: tuple[RecordKey, ...] = ()) -> None:
+    """Print one edge's plan. TTLs are printed as the integers they are —
+    there is no sentinel to translate any more (CR-5). A split RRset shows the
+    shortest TTL it really serves, annotated, so an UPDATE that appears to
+    change nothing still explains itself."""
+    split = set(split_ttl_keys)
     for r in sorted(dropped, key=lambda r: r.key):
         print(f"[{edge_name}] SKIP   {r.name} {r.rtype} (not in managed_keys)")
     for r in sorted(diff.to_add, key=lambda r: r.key):
-        print(f"[{edge_name}] ADD    {r.name} {r.rtype} {','.join(r.values)} ttl={_ttl(r.ttl)}")
+        print(f"[{edge_name}] ADD    {r.name} {r.rtype} {','.join(r.values)} ttl={r.ttl}")
     for u in sorted(diff.to_update, key=lambda u: u.desired.key):
+        note = "  (edge TTLs are split)" if u.desired.key in split else ""
         print(f"[{edge_name}] UPDATE {u.desired.name} {u.desired.rtype} "
-              f"{','.join(u.actual.values)} ttl={_ttl(u.actual.ttl)} -> "
-              f"{','.join(u.desired.values)} ttl={_ttl(u.desired.ttl)}")
+              f"{','.join(u.actual.values)} ttl={u.actual.ttl} -> "
+              f"{','.join(u.desired.values)} ttl={u.desired.ttl}{note}")
     for r in sorted(diff.to_delete, key=lambda r: r.key):
-        print(f"[{edge_name}] DELETE {r.name} {r.rtype} {','.join(r.values)} ttl={_ttl(r.ttl)}")
+        print(f"[{edge_name}] DELETE {r.name} {r.rtype} {','.join(r.values)} ttl={r.ttl}")
     if diff.is_converged:
         print(f"[{edge_name}] converged (0 changes)")
 
@@ -118,12 +124,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-empty-truth", action="store_true",
                         help="permit deleting every managed record of an edge when truth "
                              "carries none (deliberately emptying a zone)")
+    parser.add_argument("--allow-unverified-truth", action="store_true",
+                        help="permit deletions when the truth read cannot be proven "
+                             "complete (a SpatiumDDI response declaring no total, or a "
+                             "snapshot with no count and checksum)")
     parser.add_argument("--allow-snapshot-shrink", action="store_true",
-                        help="permit --export to overwrite a snapshot with fewer records")
+                        help="permit --export to overwrite a snapshot with fewer records, "
+                             "or one that cannot be read")
     args = parser.parse_args(argv)
 
     applied: list[str] = []
     current: str | None = None
+    # Edge whose provider.apply() was entered and not proven complete. Only an
+    # edge in here may be reported as possibly half-mutated: a plan-time
+    # refusal happens before any write, and telling the operator to go looking
+    # for damage that cannot exist wastes the one thing they are short of.
+    mutating: list[str] = []
     try:
         config = load_config(Path(args.config))
 
@@ -135,13 +151,21 @@ def main(argv: list[str] | None = None) -> int:
             edges = tuple(e for e in edges if e.name in set(args.edge))
 
         if args.export is not None:
-            records = _fetch_desired(config, args, edges)
-            save_desired(records, Path(args.export),
+            records, verified = _fetch_desired(config, args, edges)
+            # The provenance travels with the data: a snapshot exported from a
+            # read that could not be proven complete must not become a
+            # checksum-clean file that CI then trusts to delete.
+            save_desired(records, Path(args.export), truth_verified=verified,
                          allow_shrink=args.allow_snapshot_shrink)
             print(f"exported {len(records)} records to {args.export}")
+            if not verified:
+                print(f"warning: the read behind {args.export} could not be proven "
+                      "complete, so the snapshot is marked unverified and runs using it "
+                      "will refuse to delete. Adds and updates are unaffected.",
+                      file=sys.stderr)
             return 0
 
-        desired_all = _fetch_desired(config, args, edges)
+        desired_all, truth_verified = _fetch_desired(config, args, edges)
         providers = _build_providers(config, edges)
         # Defensive: a provider dict that does not cover every selected edge
         # would otherwise KeyError, or (before duplicate names were rejected in
@@ -151,12 +175,19 @@ def main(argv: list[str] | None = None) -> int:
             raise ConfigError(f"no provider constructed for edge(s): {', '.join(missing)}")
 
         adds = updates = deletes = 0
+        guards = dict(truth_complete=truth_verified,
+                      allow_empty_truth=args.allow_empty_truth,
+                      allow_unverified_truth=args.allow_unverified_truth)
         for edge in edges:
             current = edge.name
-            run = apply_edge if args.apply else plan_edge
-            result = run(edge, desired_all, providers[edge.name],
-                         allow_empty_truth=args.allow_empty_truth)
-            _print_diff(edge.name, result.diff, result.dropped_desired)
+            mutating.clear()
+            if args.apply:
+                result = apply_edge(edge, desired_all, providers[edge.name],
+                                    on_mutate=mutating.append, **guards)
+            else:
+                result = plan_edge(edge, desired_all, providers[edge.name], **guards)
+            _print_diff(edge.name, result.diff, result.dropped_desired,
+                        result.split_ttl_keys)
             changes = (len(result.diff.to_add) + len(result.diff.to_update)
                        + len(result.diff.to_delete))
             if args.apply and changes:
@@ -175,21 +206,35 @@ def main(argv: list[str] | None = None) -> int:
         return 2 if (args.dry_run and drifted) else 0
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
-        _report_partial_apply(args, current, applied)
+        _report_partial_apply(args, current, mutating, applied)
         return 1
     except BaseException:
         # Ctrl-C mid-apply leaves the same mixed state a provider error does.
-        _report_partial_apply(args, current, applied)
+        _report_partial_apply(args, current, mutating, applied)
         raise
 
 
 def _report_partial_apply(args: argparse.Namespace, current: str | None,
-                          applied: list[str]) -> None:
+                          mutating: list[str], applied: list[str]) -> None:
+    """Account for what an --apply left behind when it failed mid-run.
+
+    Two different facts, and conflating them cost the operator a hunt for
+    damage that could not exist. `mutating` is non-empty only once a provider's
+    apply() was entered, so a plan-time refusal (empty truth, unverified truth,
+    ownership, an unwritable key) or a read that failed before any write says
+    so plainly. The multi-edge account — which edges DID land before the
+    failure — is printed either way, because that is what makes a partial run
+    recoverable.
+    """
     if not args.apply or current is None:
         return
     done = ", ".join(applied) if applied else "none"
-    print(f"error: edge {current!r} did not complete and may be partially mutated; "
-          f"edge(s) fully applied before it: {done}", file=sys.stderr)
+    if mutating:
+        print(f"error: edge {current!r} did not complete and may be partially mutated; "
+              f"edge(s) fully applied before it: {done}", file=sys.stderr)
+    elif applied:
+        print(f"error: edge {current!r} failed before writing anything, so nothing at that "
+              f"edge changed; edge(s) fully applied before it: {done}", file=sys.stderr)
 
 
 if __name__ == "__main__":

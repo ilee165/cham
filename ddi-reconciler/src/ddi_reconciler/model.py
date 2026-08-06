@@ -24,7 +24,15 @@ def _idna_label(label: str) -> str:
     """Punycode a non-ASCII label so a unicode name and the A-label the edge
     actually serves are one identity, not two. Stdlib codec only — an `idna`
     runtime dependency would need an ADR — so labels the codec rejects pass
-    through unchanged and are then caught by _LABEL in CanonicalRecord."""
+    through unchanged and are then caught by _LABEL in CanonicalRecord.
+
+    Known limitation: the stdlib codec implements IDNA2003, which maps a few
+    characters differently from the IDNA2008 rules modern registries use — "ß"
+    folds to "ss", "İ" to "i̇", and a soft hyphen is dropped rather than
+    rejected. A name using one of those would canonicalize to an A-label the
+    edge does not serve. Nothing in config.toml or the lab zones is affected
+    (all ASCII); closing it properly needs the `idna` package and an ADR.
+    """
     if label.isascii():
         return label
     try:
@@ -58,7 +66,12 @@ def _canonical_value(rtype: str, value: str) -> str:
             raise ValueError(f"invalid AAAA record value: {value!r}")
         return str(address)
     if rtype in DOMAIN_VALUE_RECORD_TYPES:
-        return value.rstrip(".").lower()
+        # A CNAME/PTR value IS a DNS name, so it goes through the same
+        # canonicalizer names do. Lowercasing and dot-stripping it here while
+        # leaving it un-punycoded made a unicode target and the A-label the
+        # edge actually serves two identities — permanent drift, and the same
+        # asymmetry canonical_name() exists to prevent on the name side.
+        return canonical_name(value)
     return value  # TXT: content is opaque; case and dots are significant
 
 def canonical_value(rtype: str, value: str) -> str:

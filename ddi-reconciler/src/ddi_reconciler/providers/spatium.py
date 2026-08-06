@@ -10,6 +10,13 @@ arrives is indistinguishable downstream from "this record should not exist",
 i.e. a delete order. So an envelope this adapter cannot fully account for is an
 error, never a quietly-assumed "that was probably everything".
 
+That check only exists when the response declares a total. A bare-list body
+carries nothing to verify the read against, so the read is *unproven* — not
+wrong, just unaccountable. `read_verified` reports which of the two happened
+for the whole fetch (every zone listing and every records page), and
+runner.plan_edge gates DELETEs on it: an unproven read may still add and
+update, but it may not be read as an order to remove anything.
+
 Malformed payloads are reported as `spatium API error` RuntimeErrors rather
 than escaping as KeyError/AttributeError, which would bypass the CLI's 0/1/2
 exit-code contract. That includes a truth record the model rejects: it is
@@ -81,6 +88,10 @@ def _is_loopback(host: str) -> bool:
 class SpatiumProvider:
     def __init__(self, base_url: str, token: str):
         self.base_url = base_url.rstrip("/")
+        # Whether every response in the last fetch_desired() could be checked
+        # against a count it declared. False until a fetch proves otherwise —
+        # an unread provider has proven nothing.
+        self.read_verified = False
         self._session = requests.Session()
         if token:
             self._session.headers["Authorization"] = f"Bearer {token}"
@@ -180,7 +191,19 @@ class SpatiumProvider:
                 "limit": page_len if limit is None else limit})
         return None
 
-    def _get(self, path: str) -> list:
+    def _read(self, path: str) -> list:
+        """_get() with its verifiability folded into the fetch-wide verdict.
+
+        One unaccountable response anywhere — the zone listing or any records
+        page — makes the whole desired set unprovable, because a zone that
+        never arrives drops every record in it.
+        """
+        items, verified = self._get(path)
+        self.read_verified = self.read_verified and verified
+        return items
+
+    def _get(self, path: str) -> tuple[list, bool]:
+        """(items, whether the read could be checked against a declared count)."""
         url: str | None = f"{self.base_url}{path}"
         items: list = []
         declared_total: int | None = None
@@ -224,7 +247,11 @@ class SpatiumProvider:
                 f"but the adapter read {len(items)}; refusing a short read of the source of "
                 "truth, because a desired record that never arrives reads as a delete order "
                 "downstream")
-        return items
+        # Verified means "checked", not "looked fine": only a declared total
+        # can tell a whole read from a silently short one. A bare list and an
+        # envelope with no count are both unproven, and the caller must not be
+        # able to mistake unproven for verified.
+        return items, declared_total is not None
 
     # ---- payload access ---------------------------------------------------
 
@@ -254,12 +281,13 @@ class SpatiumProvider:
     def fetch_desired(self, zones: set[str]) -> list[CanonicalRecord]:
         wanted = {canonical_name(z) for z in zones}
         grouped: dict[tuple[str, str, str], dict] = {}
-        for zone in self._get(ZONES_PATH):
+        self.read_verified = True  # every _read() below can only take this away
+        for zone in self._read(ZONES_PATH):
             zone_name = canonical_name(str(self._field(zone, "name", "zone entry")))
             if zone_name not in wanted:
                 continue
             zone_id = self._field(zone, "id", f"zone {zone_name!r}")
-            for rec in self._get(RECORDS_PATH.format(zone_id=zone_id)):
+            for rec in self._read(RECORDS_PATH.format(zone_id=zone_id)):
                 what = f"record in zone {zone_name!r}"
                 rtype = str(self._field(rec, "type", what)).strip().upper()
                 if rtype not in SUPPORTED_RECORD_TYPES:

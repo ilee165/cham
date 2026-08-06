@@ -341,3 +341,24 @@ def test_unicode_and_punycode_names_are_one_identity():
     assert unicode_key == canonical_record_key(Z, a_label, "A")
     assert unicode_key[1] == a_label
     assert rec("DÉMO", "10.10.4.20").name == a_label
+
+
+@pytest.mark.parametrize("rtype", ["CNAME", "PTR"])
+def test_unicode_and_punycode_targets_are_one_identity(rtype):
+    """A CNAME/PTR value IS a DNS name. Names were punycoded and values were
+    not, so a unicode target and the A-label the edge serves were two
+    identities — permanent drift that no apply could ever close."""
+    a_label = "démo".encode("idna").decode("ascii") + ".example.com"
+
+    assert rec("app", "DÉMO.Example.com.", rtype=rtype).values == (a_label,)
+    assert (rec("app", "démo.example.com", rtype=rtype).values
+            == rec("app", a_label, rtype=rtype).values)
+
+
+def test_a_unicode_target_does_not_read_as_drift_against_its_a_label():
+    desired = rec("app", "démo.example.com", rtype="CNAME")
+    actual = rec("app", "xn--dmo-bma.example.com", rtype="CNAME")
+
+    d = diff_records([desired], [actual], MANAGED, managed_keys={desired.key})
+
+    assert d.to_update == [] and d.to_add == [] and d.to_delete == []

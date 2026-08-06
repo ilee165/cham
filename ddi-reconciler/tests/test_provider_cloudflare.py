@@ -5,11 +5,15 @@ import json
 import pytest
 import responses
 
+from ddi_reconciler.config import EdgeConfig
 from ddi_reconciler.model import CanonicalRecord, Diff, RecordUpdate
-from ddi_reconciler.providers.cloudflare import _SPLIT_TTL, CloudflareProvider
+from ddi_reconciler.providers.cloudflare import CloudflareProvider
+from ddi_reconciler.runner import apply_edge, plan_edge
 
 API = "https://api.cloudflare.com/client/v4"
 Z = "dwsolution.co"
+SPLIT_EDGE = EdgeConfig(name="cf", provider="cloudflare", zone=Z,
+                        managed_keys=frozenset({(Z, "split", "A")}))
 
 
 def register_zone():
@@ -232,7 +236,7 @@ def test_apply_refuses_a_record_from_another_zone(branch):
 
 @pytest.mark.parametrize("ttls", [(300, 60), (60, 300)])
 @responses.activate
-def test_split_ttl_rrset_reads_as_drift_whatever_the_api_order(ttls, capsys):
+def test_split_ttl_rrset_is_flagged_whatever_the_api_order(ttls, capsys):
     """CR-5: keeping only the first API record's TTL made a split RRset read as
     converged or drifted purely by Cloudflare's result ordering."""
     register_zone()
@@ -242,10 +246,72 @@ def test_split_ttl_rrset_reads_as_drift_whatever_the_api_order(ttls, capsys):
         {"id": "s2", "type": "A", "name": "split.dwsolution.co",
          "content": "10.0.0.2", "ttl": ttls[1]},
     ])
-    actual = CloudflareProvider(Z, "token").fetch_actual({Z})[0]
-    assert actual.ttl == _SPLIT_TTL          # drift against any TTL Cloudflare accepts
-    assert actual.ttl not in {300, 60}
+    provider = CloudflareProvider(Z, "token")
+    actual = provider.fetch_actual({Z})[0]
+    assert actual.ttl == 60                            # the shortest really served
+    assert provider.split_ttl_keys == {(Z, "split", "A")}
     assert "split per-record TTLs" in capsys.readouterr().err
+
+
+@responses.activate
+def test_split_ttl_is_reported_out_of_band_not_as_a_sentinel_ttl():
+    """CR-5 regression: the first fix encoded the split as ttl=2147483647, which
+    a desired record may legitimately carry — and then compares equal to, so a
+    genuinely split RRset reported converged. No TTL value may mean 'split'."""
+    register_zone()
+    register_records([
+        {"id": "s1", "type": "A", "name": "split.dwsolution.co",
+         "content": "10.0.0.1", "ttl": 300},
+        {"id": "s2", "type": "A", "name": "split.dwsolution.co",
+         "content": "10.0.0.2", "ttl": 2147483647},
+    ])
+    provider = CloudflareProvider(Z, "token")
+    actual = provider.fetch_actual({Z})[0]
+    # Even when the edge really serves the old sentinel, the report is a TTL
+    # the edge holds and the split lives in the key set beside it.
+    assert actual.ttl == 300
+    assert provider.split_ttl_keys == {(Z, "split", "A")}
+
+
+@responses.activate
+def test_uniform_ttl_rrset_is_never_flagged_as_split():
+    register_zone()
+    register_records([
+        {"id": "u1", "type": "A", "name": "same.dwsolution.co",
+         "content": "10.0.0.1", "ttl": 300},
+        {"id": "u2", "type": "A", "name": "same.dwsolution.co",
+         "content": "10.0.0.2", "ttl": 300},
+    ])
+    provider = CloudflareProvider(Z, "token")
+    assert provider.fetch_actual({Z})[0].ttl == 300
+    assert provider.split_ttl_keys == set()
+
+
+@responses.activate
+def test_split_flag_is_cleared_by_the_next_fetch():
+    """apply() normalizes the set, so the convergence re-check must not still
+    see it as split — or a converged edge would never stop drifting."""
+    register_zone()
+    register_records([
+        {"id": "s1", "type": "A", "name": "split.dwsolution.co",
+         "content": "10.0.0.1", "ttl": 60},
+        {"id": "s2", "type": "A", "name": "split.dwsolution.co",
+         "content": "10.0.0.2", "ttl": 300},
+    ])
+    provider = CloudflareProvider(Z, "token")
+    provider.fetch_actual({Z})
+    assert provider.split_ttl_keys
+
+    responses.reset()
+    register_zone()
+    register_records([
+        {"id": "s1", "type": "A", "name": "split.dwsolution.co",
+         "content": "10.0.0.1", "ttl": 300},
+        {"id": "s2", "type": "A", "name": "split.dwsolution.co",
+         "content": "10.0.0.2", "ttl": 300},
+    ])
+    provider.fetch_actual({Z})
+    assert provider.split_ttl_keys == set()
 
 
 @responses.activate
@@ -271,6 +337,50 @@ def test_split_ttl_apply_normalizes_every_record_in_the_rrset():
     assert patched_split.call_count == 1
     assert json.loads(patched_split.calls[0].request.body) == {"ttl": 300}
     assert patched_ok.call_count == 0  # already at the desired TTL
+
+
+def _register_split_rrset(ttls=(300, 60)):
+    register_records([
+        {"id": "s1", "type": "A", "name": "split.dwsolution.co",
+         "content": "10.0.0.1", "ttl": ttls[0]},
+        {"id": "s2", "type": "A", "name": "split.dwsolution.co",
+         "content": "10.0.0.2", "ttl": ttls[1]},
+    ])
+
+
+@pytest.mark.parametrize("desired_ttl", [
+    2147483647,   # the old in-band sentinel: used to compare EQUAL and converge
+    60,           # the shortest TTL really served: the same collision, legally
+])
+@responses.activate
+def test_a_split_rrset_never_reports_converged_whatever_the_desired_ttl(desired_ttl):
+    """CR-5's reproduction, end to end with the real adapter and runner. Any
+    number the adapter puts in the TTL scalar is a number a desired record may
+    also carry, so the split is reported beside it instead."""
+    register_zone()
+    _register_split_rrset()
+    desired = CanonicalRecord(zone=Z, name="split", rtype="A",
+                              values=("10.0.0.1", "10.0.0.2"), ttl=desired_ttl)
+    result = plan_edge(SPLIT_EDGE, [desired], CloudflareProvider(Z, "token"),
+                       truth_complete=True)
+    assert not result.diff.is_converged
+    assert result.split_ttl_keys == ((Z, "split", "A"),)
+
+
+@responses.activate
+def test_a_split_rrset_converges_in_one_apply():
+    """And the forced update is not a permanent one: apply() normalizes every
+    record in the set, so the convergence re-check passes."""
+    register_zone()
+    _register_split_rrset()
+    _register_split_rrset(ttls=(300, 300))   # what the second fetch sees
+    patched = responses.patch(f"{API}/zones/zid/dns_records/s2",
+                              json={"success": True, "result": {}})
+    desired = CanonicalRecord(zone=Z, name="split", rtype="A",
+                              values=("10.0.0.1", "10.0.0.2"), ttl=300)
+    apply_edge(SPLIT_EDGE, [desired], CloudflareProvider(Z, "token"), truth_complete=True)
+    assert patched.call_count == 1
+    assert json.loads(patched.calls[0].request.body) == {"ttl": 300}
 
 
 @responses.activate

@@ -11,8 +11,13 @@ ordering guarantees it).
 Three consequences of that shape are load-bearing here:
 
 * TTL is stored per API record, so an RRset can hold several TTLs. The model
-  carries one TTL per RRset, so a split is reported as _SPLIT_TTL — always
-  drift — and apply() normalizes every record in the set (CR-5).
+  carries one TTL per RRset, so a split cannot be represented in it at all:
+  the RRset is reported with the shortest TTL the edge actually serves and its
+  key is recorded in `split_ttl_keys`, which runner.plan_edge reads to force an
+  UPDATE. apply() then normalizes every record in the set (CR-5). Encoding the
+  split as an out-of-band sentinel TTL was the first fix and was wrong: a
+  desired TTL equal to the sentinel compared equal to it and reported
+  converged, which is the same false convergence CR-5 was filed for.
 * Two records cannot coexist at one name for a single-valued type, so CNAME is
   retargeted in place; every other type keeps create-before-delete, whose
   failure window over-serves rather than under-serves (CR-2).
@@ -55,13 +60,6 @@ _MAX_PAGES = 1000
 _TTL_AUTOMATIC = 1
 _TTL_MIN, _TTL_MAX = 60, 86400
 
-# Reported as the RRset TTL when Cloudflare's per-record TTLs disagree. The
-# model carries a single TTL per RRset, so the split has to be encoded in that
-# one scalar: this is the DNS maximum, far above anything Cloudflare will store
-# (86400), so it can never collide with a TTL actually served at this edge and
-# it always reads as drift against a TTL this edge could accept.
-_SPLIT_TTL = 2147483647
-
 # Types where two records cannot coexist at one owner name. DNS forbids a
 # second CNAME at a name and Cloudflare enforces it (error 81053), so a
 # create-before-delete retarget can never converge. Every other supported type
@@ -90,6 +88,14 @@ class CloudflareProvider:
         self._api_records: dict[RecordKey, list[dict]] = {}
         # Edge records fetch_actual() could not represent, kept for the report.
         self.skipped: list[tuple[RecordKey, str]] = []
+        # RRsets whose per-record TTLs disagreed in the last fetch_actual().
+        # Out of band on purpose: a value carried in the TTL scalar is a value
+        # a desired record can also hold, and then the two compare equal.
+        # runner.plan_edge intersects this with managed_keys and forces an
+        # UPDATE, so the set converges even when the desired TTL happens to
+        # equal the one reported below. Re-derived per fetch, never sticky:
+        # after apply() normalizes the set it is no longer split.
+        self.split_ttl_keys: set[RecordKey] = set()
 
     # --- plumbing -----------------------------------------------------------
     @staticmethod
@@ -292,15 +298,25 @@ class CloudflareProvider:
         return raw_records
 
     def _rrset_ttl(self, key: RecordKey, ttls: set[int]) -> int:
+        """The one TTL to report for an RRset, plus a note when it had several.
+
+        The reported value is always a TTL the edge really serves — the
+        shortest, so what the model shows can never over-promise cache
+        lifetime. It is deliberately NOT a marker value: the split is recorded
+        in split_ttl_keys instead, because any number this returns is a number
+        a desired record may legitimately carry, and the diff compares the two
+        with `!=`.
+        """
         if len(ttls) == 1:
             return next(iter(ttls))
+        self.split_ttl_keys.add(key)
         if self._may_own(key):
             self._warn(
                 f"cloudflare RRset {'/'.join(key)} carries split per-record TTLs "
                 f"{sorted(ttls)}; the model holds one TTL per RRset, so it is reported as "
-                f"ttl={_SPLIT_TTL} (always drift) and every record in the set is "
-                "normalized to the desired TTL on apply")
-        return _SPLIT_TTL
+                f"ttl={min(ttls)} (the shortest) and flagged as split, which forces an "
+                "update that normalizes every record in the set to the desired TTL")
+        return min(ttls)
 
     def fetch_actual(self, zones: set[str]) -> list[CanonicalRecord]:
         requested = {canonical_name(zone) for zone in zones}
@@ -313,6 +329,7 @@ class CloudflareProvider:
 
         self._api_records.clear()
         self.skipped.clear()
+        self.split_ttl_keys.clear()
         grouped: dict[RecordKey, dict] = {}
         for raw in raw_records:
             if not isinstance(raw, dict) or not _RECORD_FIELDS <= raw.keys():
@@ -344,6 +361,7 @@ class CloudflareProvider:
                         f"is malformed at the edge: {exc}") from exc
                 self.skipped.append((key, str(exc)))
                 self._api_records.pop(key, None)
+                self.split_ttl_keys.discard(key)  # nothing to force-update
                 self._warn(
                     f"skipping cloudflare record {zone}/{name}/{rtype}, which this "
                     f"reconciler does not own and cannot represent: {exc}")
