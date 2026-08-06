@@ -53,7 +53,7 @@ was made. Start with ADR-001.
 
 ## Status
 - [x] Phase 1 — local SpatiumDDI, zones, DHCP→DNS propagation
-- [ ] Phase 2 — Azure core (hub, spokes, peering, NSG, UDR)
-- [ ] Phase 3 — WireGuard tunnel + hybrid resolution
+- [x] Phase 2 — Azure core (hub, spokes, peering, NSG, UDR)
+- [x] Phase 3 — WireGuard tunnel + hybrid resolution
 - [ ] Phase 4 — Cloudflare + reconciler v2
 - [ ] Phase 5 — CI/CD pipeline
