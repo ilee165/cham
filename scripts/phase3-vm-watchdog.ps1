@@ -89,6 +89,21 @@ function Write-PowerState {
     Add-Content -LiteralPath $resolvedLogPath -Value $line -Encoding utf8
 }
 
+# Native az stderr captured via 2>&1 arrives as ErrorRecord objects mixed
+# into the success stream; the first stderr line, whitespace-collapsed, is
+# the retry diagnostic recorded in the log.
+function Get-FirstStderrLine {
+    param(
+        [object[]] $NativeOutput
+    )
+
+    $firstLine = [string[]] @(
+        $NativeOutput |
+            Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }
+    ) | Select-Object -First 1
+    ([string] $firstLine -replace '\s+', ' ').Trim()
+}
+
 $officialAzureCli = 'C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd'
 if (Test-Path -LiteralPath $officialAzureCli -PathType Leaf) {
     $azureCli = $officialAzureCli
@@ -108,9 +123,13 @@ else {
 # acquisition against Azure AD while remaining read-only.
 # Skipped in -DryRun, which must make no Azure call.
 if (-not $DryRun) {
-    & $azureCli account get-access-token --output none --only-show-errors *> $null
+    $probeOutput = @(& $azureCli account get-access-token --output none --only-show-errors 2>&1)
     if ($LASTEXITCODE -ne 0) {
-        throw 'Azure CLI authentication probe failed at arm time.'
+        throw (
+            'Azure CLI authentication probe failed at arm time: {0}' -f (
+                Get-FirstStderrLine -NativeOutput $probeOutput
+            )
+        )
     }
 }
 
@@ -158,13 +177,17 @@ while ($pendingDeallocations.Count -gt 0) {
             '--no-wait',
             '--only-show-errors'
         )
-        & $azureCli @deallocateArguments *> $null
+        $deallocateOutput = @(& $azureCli @deallocateArguments 2>&1)
         if ($LASTEXITCODE -eq 0) {
             Write-PowerState -VmName $vmName -PowerState 'deallocate_accepted'
             $null = $pendingDeallocations.Remove($vmName)
         }
         else {
-            Write-PowerState -VmName $vmName -PowerState 'deallocate_retry_pending'
+            Write-PowerState -VmName $vmName -PowerState (
+                'deallocate_retry_pending reason={0}' -f (
+                    Get-FirstStderrLine -NativeOutput $deallocateOutput
+                )
+            )
         }
     }
     if ($pendingDeallocations.Count -gt 0) {
@@ -193,10 +216,19 @@ while ($pendingVmNames.Count -gt 0) {
             '--output', 'json',
             '--only-show-errors'
         )
-        $statusJson = @(& $azureCli @statusArguments 2>$null) -join [Environment]::NewLine
+        $statusOutput = @(& $azureCli @statusArguments 2>&1)
+        $statusJson = @(
+            $statusOutput |
+                Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }
+        ) -join [Environment]::NewLine
 
         $powerState = 'unknown'
-        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($statusJson)) {
+        if ($LASTEXITCODE -ne 0) {
+            $powerState = 'unknown reason={0}' -f (
+                Get-FirstStderrLine -NativeOutput $statusOutput
+            )
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($statusJson)) {
             try {
                 $statuses = @($statusJson | ConvertFrom-Json)
                 $powerStatus = $statuses |
