@@ -29,3 +29,6 @@ dist/
 
 # graphify knowledge-graph output (local tooling artifact)
 graphify-out/
+
+# SDD scratch workspaces
+.superpowers/
