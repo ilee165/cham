@@ -25,14 +25,18 @@ command exit codes:
 | `vm-test-app` | `VM deallocated` |
 | `vm-test-mgmt` | `VM deallocated` |
 
-## Operator-active setup time
+## Setup time (measured)
 
 Timestamps captured during the approved window show watchdog arm at
-`2026-08-06T04:03:59Z` and the fresh-lease trigger — after the full hub
-bring-up, key verification, tunnel gates, and app start — at
-`2026-08-06T04:17:31Z`. Operator-active setup was under ten minutes; the
-whole live window used roughly 25 of 60 authorized minutes. No VM was
-restarted for documentation validation.
+`2026-08-06T04:03:59Z` and the fresh-lease trigger at
+`2026-08-06T04:17:31Z`: **13 minutes 32 seconds wall clock** for the full
+hub start, cloud-init wait, key installation and verification, tunnel
+bring-up, every hub-only gate, app start, auto-registration, and the lease
+trigger. That interval includes several minutes of Azure boot/cloud-init
+waiting and local SSH diagnostics; the committed record does not isolate
+operator-active time from waiting, so no sub-interval claim is made beyond
+the measured wall clock. The whole live window used roughly 25 of 60
+authorized minutes. No VM was restarted for documentation validation.
 
 ## Validation suite (Task 3.5)
 

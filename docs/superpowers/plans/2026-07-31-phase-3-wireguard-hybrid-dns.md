@@ -1,7 +1,17 @@
 # Phase 3 — WireGuard Tunnel + Hybrid DNS Implementation Plan
 
-**Status:** Revised and independently plan-verified on 2026-08-04. Awaiting
-operator review.
+> **Execution history (2026-08-06):** This plan was executed to completion.
+> The operator explicitly authorized Checkpoint B (bound to commit `53cea30`
+> and the reviewed watchdog hash); all tunnel/DNS gates passed in a ~25-minute
+> live window; Checkpoint C evidence was committed; Checkpoint D destroyed the
+> lab via an approved saved plan. See `docs/evidence/phase3/`. The
+> authorization language below is retained unchanged as the historical record
+> of the pre-execution contract. Known live deviation: `ssh -J` did not carry
+> the identity to the jump hop, so app access used the explicit
+> `ProxyCommand` form now shown in section 2.5 and the runbook.
+
+**Status (historical, pre-execution):** Revised and independently
+plan-verified on 2026-08-04. Awaiting operator review.
 No Phase 3 implementation, VM start, Terraform apply, or Azure mutation is
 authorized by this document.
 
@@ -667,12 +677,16 @@ matching auto-registered address after the bounded post-start poll is a
 Checkpoint B failure and triggers mandatory closeout.
 
 The retained app image has no Terraform/cloud-init guarantee that `dig` is
-installed. Through Windows OpenSSH + ProxyJump, require it or install
-`dnsutils` inside the temporary guest:
+installed. Reach the app through the hub with an explicit `ProxyCommand`
+carrying the dedicated identity — `ssh -J` does not pass `-i` to the jump
+hop and fails publickey there (proven live at Checkpoint B):
 
 ```powershell
-ssh.exe -i "$SSH_KEY" -o IdentitiesOnly=yes -J "labadmin@$HUB_IP" `
-  "labadmin@$APP_IP" `
+$appJump = @(
+  '-i', $SSH_KEY, '-o', 'IdentitiesOnly=yes',
+  '-o', "ProxyCommand=ssh.exe -i $SSH_KEY -o IdentitiesOnly=yes -W %h:%p labadmin@$HUB_IP"
+)
+ssh.exe @appJump "labadmin@$APP_IP" `
   'command -v dig >/dev/null || (sudo apt-get update && sudo apt-get install -y dnsutils)'
 ```
 
@@ -712,11 +726,9 @@ localized cheaply:
 The app's explicit transport checks are:
 
 ```powershell
-ssh.exe -i "$SSH_KEY" -o IdentitiesOnly=yes -J "labadmin@$HUB_IP" `
-  "labadmin@$APP_IP" `
+ssh.exe @appJump "labadmin@$APP_IP" `
   'dig +time=2 +tries=1 @10.10.0.10 printer.lab.dwsolution.co'
-ssh.exe -i "$SSH_KEY" -o IdentitiesOnly=yes -J "labadmin@$HUB_IP" `
-  "labadmin@$APP_IP" `
+ssh.exe @appJump "labadmin@$APP_IP" `
   'dig +tcp +time=2 +tries=1 @10.10.0.10 printer.lab.dwsolution.co'
 ```
 
