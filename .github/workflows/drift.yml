@@ -25,6 +25,17 @@ jobs:
       - name: Run reconciler dry-run
         id: reconcile
         working-directory: ddi-reconciler
+        env:
+          # azure/login authenticates the az CLI (which DefaultAzureCredential
+          # then picks up) but does not export this, and the CLI requires it
+          # explicitly. It is an identifier, not a credential — the federated
+          # trust in Entra is what actually grants access.
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          # --dry-run only ever issues GETs (GET /zones, GET /dns_records), so
+          # a Zone:Read + DNS:Read token is sufficient here. Scoping this
+          # unattended job to a read-only token means it cannot mutate DNS even
+          # if something goes wrong in it; keep DNS:Edit for the lab environment.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           pip install -q uv
 
