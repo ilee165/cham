@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ddi_reconciler.model import CanonicalRecord, Diff
+from ddi_reconciler.model import CanonicalRecord, Diff, RecordUpdate
 from ddi_reconciler.providers.azure import AzureProvider
 
 Z = "azure.dwsolution.co"
@@ -74,6 +74,16 @@ def test_apply_upserts_adds_updates_and_deletes():
     assert client.record_sets.deletes == [(Z, "A", "old")]
 
 
+def test_apply_updates_desired_record():
+    provider, client = make_provider([])
+    desired = CanonicalRecord(zone=Z, name="web", rtype="A", values=("10.10.5.1",), ttl=600)
+    actual = CanonicalRecord(zone=Z, name="web", rtype="A", values=("10.10.4.1",))
+    provider.apply(Diff(to_update=[RecordUpdate(desired=desired, actual=actual)]))
+    assert client.record_sets.upserts == [
+        (Z, "A", "web", {"ttl": 600, "a_records": [{"ipv4_address": "10.10.5.1"}]})]
+    assert client.record_sets.deletes == []
+
+
 def test_api_failure_is_runtime_error():
     class Exploding:
         def list(self, resource_group, zone):
@@ -81,3 +91,36 @@ def test_api_failure_is_runtime_error():
     provider = AzureProvider("sub-id", "rg", client=SimpleNamespace(record_sets=Exploding()))
     with pytest.raises(RuntimeError, match="azure API error"):
         provider.fetch_actual({Z})
+
+
+def test_apply_error_on_create_or_update():
+    class FailingRecordSets:
+        def create_or_update(self, *args, **kwargs):
+            raise Exception("create failed")
+        def delete(self, *args, **kwargs):
+            pass
+    provider = AzureProvider("sub-id", "rg", client=SimpleNamespace(record_sets=FailingRecordSets()))
+    add = CanonicalRecord(zone=Z, name="app", rtype="A", values=("10.10.4.30",))
+    with pytest.raises(RuntimeError, match="azure API error"):
+        provider.apply(Diff(to_add=[add]))
+
+
+def test_apply_error_on_delete():
+    class FailingRecordSets:
+        def create_or_update(self, *args, **kwargs):
+            pass
+        def delete(self, *args, **kwargs):
+            raise Exception("delete failed")
+    provider = AzureProvider("sub-id", "rg", client=SimpleNamespace(record_sets=FailingRecordSets()))
+    gone = CanonicalRecord(zone=Z, name="old", rtype="A", values=("10.0.0.1",))
+    with pytest.raises(RuntimeError, match="azure API error"):
+        provider.apply(Diff(to_delete=[gone]))
+
+
+def test_fetch_preserves_ttl_zero():
+    provider, _ = make_provider([
+        record_set("edge", "A", ips=["10.10.4.30"], ttl=0),
+    ])
+    records = provider.fetch_actual({Z})
+    assert len(records) == 1
+    assert records[0].ttl == 0

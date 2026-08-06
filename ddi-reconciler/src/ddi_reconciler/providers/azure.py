@@ -51,7 +51,7 @@ class AzureProvider:
                 if not values:
                     continue
                 records.append(CanonicalRecord(zone=zone, name=rs.name, rtype=rtype,
-                                               values=values, ttl=int(rs.ttl or 300)))
+                                               values=values, ttl=int(rs.ttl) if rs.ttl is not None else 300))
         return records
 
     @staticmethod
