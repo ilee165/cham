@@ -95,7 +95,13 @@ resource "azurerm_network_security_group" "hub" {
 
   # Priority 125, not 130: 130 is already taken by AllowInternetTransitFromSpokes
   # below (Inbound priorities must be unique within an NSG). Placed directly
-  # after the DNS rule to match the source brief's intended ordering.
+  # after the DNS rule so the two "internal service on the hub" allows sit
+  # together as one block, ahead of the spoke-transit rules that follow.
+  #
+  # Destination is var.hub_vm_ip, not "*" — see the NSG-scoping invariant
+  # above. Source prefixes reuse the same variables as AllowDNSFromRFC1918
+  # so this rule cannot silently diverge from it if onprem_address_space or
+  # wg_transfer_cidr is overridden.
   security_rule {
     name                       = "AllowHTTPInternal"
     priority                   = 125
@@ -104,8 +110,8 @@ resource "azurerm_network_security_group" "hub" {
     protocol                   = "Tcp"
     source_port_range          = "*"
     destination_port_range     = "80"
-    source_address_prefixes    = ["10.10.0.0/16", "10.20.0.0/16", "172.16.0.0/24"]
-    destination_address_prefix = "*"
+    source_address_prefixes    = ["10.10.0.0/16", var.onprem_address_space, var.wg_transfer_cidr]
+    destination_address_prefix = var.hub_vm_ip
   }
 
   security_rule {
@@ -278,5 +284,9 @@ resource "azurerm_linux_virtual_machine" "hub" {
     lab_zone           = var.lab_zone
     onprem_dns_ip      = var.onprem_dns_ip # laptop BIND9 via tunnel
     wg_peer_public_key = var.wg_peer_public_key
+    # nginx binds only this address (see cloud-init nginx site block) so the
+    # internal page stays off any interface other than the hub's private IP
+    # even if the NSG in this module is ever widened (defense in depth, CR-3).
+    hub_vm_ip = var.hub_vm_ip
   }), "\r\n", "\n"))
 }

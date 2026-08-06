@@ -69,10 +69,35 @@ write_files:
     content: |
       <h1>INTERNAL — served from the hub over the tunnel</h1>
 
+  # Overrides Debian's stock catch-all server block. Written ahead of the
+  # nginx package install (write_files runs before packages), the same
+  # ordering the plain index.html above already relies on — nginx's
+  # postinst only creates sites-available/default when it is absent, so a
+  # file already on disk survives the install untouched. Binding explicitly
+  # to hub_vm_ip means the page is never reachable on any interface/address
+  # other than the hub's private IP, regardless of what the NSG allows
+  # (defense in depth for CR-3, since IPv6 is unused here the stock
+  # "listen [::]:80" line is dropped rather than widened).
+  - path: /etc/nginx/sites-available/default
+    content: |
+      server {
+        listen ${hub_vm_ip}:80;
+
+        root /var/www/html;
+        index index.html;
+
+        server_name _;
+
+        location / {
+          try_files $uri $uri/ =404;
+        }
+      }
+
 runcmd:
   - sysctl --system
   - /usr/local/sbin/configure-cham-nat
   - systemctl enable --now bind9 || systemctl enable --now named
+  - systemctl enable --now nginx
   # WireGuard left disabled until a real private key is installed:
   - systemctl disable --now wg-quick@wg0 || true
   - >-

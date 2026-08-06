@@ -8,8 +8,8 @@ tfplan
 crash.log
 
 # Secrets & local config — NEVER commit
-terraform.tfvars
-*.auto.tfvars
+*.tfvars
+!*.tfvars.example
 .env
 *.pem
 *.key

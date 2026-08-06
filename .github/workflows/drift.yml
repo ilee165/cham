@@ -24,12 +24,34 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Run reconciler dry-run
         id: reconcile
-        continue-on-error: true
+        working-directory: ddi-reconciler
         run: |
-          pip install -q azure-identity azure-mgmt-privatedns requests
-          python ddi-reconciler/cli.py --dry-run | tee drift.txt
+          pip install -q uv
+
+          # cham-reconcile's exit-code contract (see ddi_reconciler/cli.py):
+          #   0 converged, 1 operational error, 2 drift found (dry-run only).
+          # Actions' default bash runs with -e/-o pipefail, so a nonzero exit
+          # from this pipeline would otherwise abort the step before the
+          # branch below can read it. Disable errexit around just this
+          # command, and read PIPESTATUS[0] rather than $? so tee's own
+          # always-zero exit can never mask cham-reconcile's real one.
+          set +e
+          uv run cham-reconcile --dry-run --desired-from-file desired-records.json \
+            | tee "$GITHUB_WORKSPACE/drift.txt"
+          exit_code="${PIPESTATUS[0]}"
+          set -e
+
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+
+          if [ "$exit_code" -eq 1 ]; then
+            echo "::error::cham-reconcile exited 1 (operational error: config/auth/network/convergence — not drift). See the log above."
+            exit 1
+          fi
+          # exit_code is 0 (converged) or 2 (drift found) here — both mean
+          # the tool ran to completion, so let the job continue to the
+          # drift-issue step, which branches on the captured code.
       - name: Open issue on drift
-        if: steps.reconcile.outcome == 'failure'
+        if: steps.reconcile.outputs.exit_code == '2'
         uses: actions/github-script@v7
         with:
           script: |
