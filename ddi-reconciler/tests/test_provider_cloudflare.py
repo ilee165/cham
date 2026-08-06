@@ -1,5 +1,7 @@
 """Cloudflare adapter — HTTP mocked with responses. Exercises the RRset
 grouping the docstring warns about."""
+import json
+
 import pytest
 import responses
 
@@ -111,6 +113,31 @@ def test_apply_to_update_without_fetch_raises_state_error():
                               values=("1.1.1.1",), ttl=300)
     with pytest.raises(RuntimeError, match="cloudflare API state error"):
         provider.apply(Diff(to_update=[RecordUpdate(desired=desired, actual=actual)]))
+
+
+@responses.activate
+def test_apply_ttl_only_update_patches_kept_value():
+    """desired.ttl != actual.ttl with the same value set must PATCH the
+    existing record's ttl in place -- no add/delete round-trip."""
+    register_zone()
+    register_records([
+        {"id": "ttl1", "type": "A", "name": "ttl.dwsolution.co", "content": "5.5.5.5", "ttl": 300},
+    ])
+    provider = CloudflareProvider(Z, "token")
+    actual = provider.fetch_actual({Z})[0]
+    desired = CanonicalRecord(zone=Z, name="ttl", rtype="A",
+                              values=("5.5.5.5",), ttl=600)
+    patched = responses.patch(f"{API}/zones/zid/dns_records/ttl1",
+                              json={"success": True, "result": {"id": "ttl1"}})
+    created = responses.post(f"{API}/zones/zid/dns_records",
+                             json={"success": True, "result": {"id": "unexpected"}})
+    deleted = responses.delete(f"{API}/zones/zid/dns_records/ttl1",
+                               json={"success": True, "result": {}})
+    provider.apply(Diff(to_update=[RecordUpdate(desired=desired, actual=actual)]))
+    assert patched.call_count == 1
+    assert json.loads(patched.calls[0].request.body) == {"ttl": 600}
+    assert created.call_count == 0
+    assert deleted.call_count == 0
 
 
 @responses.activate
