@@ -18,14 +18,16 @@ from ddi_reconciler.model import CanonicalRecord, Diff
 from ddi_reconciler.runner import ConvergenceError, apply_edge, plan_edge
 
 
-def _build_providers(config: Config) -> dict:
+def _build_providers(config: Config, edges=None) -> dict:
     """Edge name -> constructed provider. Lazy imports keep file-mode dry-runs
     from paying the Azure SDK import cost. Tests monkeypatch this function."""
+    if edges is None:
+        edges = config.edges
     from ddi_reconciler.providers.azure import AzureProvider
     from ddi_reconciler.providers.cloudflare import CloudflareProvider
 
     providers = {}
-    for edge in config.edges:
+    for edge in edges:
         if edge.provider == "azure":
             providers[edge.name] = AzureProvider(
                 subscription_id=os.environ["AZURE_SUBSCRIPTION_ID"],
@@ -92,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
             edges = tuple(e for e in edges if e.name in set(args.edge))
 
         desired_all = _fetch_desired(config, args)
-        providers = _build_providers(config)
+        providers = _build_providers(config, edges)
 
         adds = updates = deletes = 0
         for edge in edges:

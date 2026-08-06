@@ -51,7 +51,7 @@ def files(tmp_path):
 
 def run_cli(monkeypatch, provider, config, desired, mode):
     monkeypatch.setattr(cli, "_build_providers",
-                        lambda cfg: {"azure-private": provider})
+                        lambda cfg, edges=None: {"azure-private": provider})
     return cli.main([mode, "--config", str(config),
                      "--desired-from-file", str(desired)])
 
@@ -80,7 +80,7 @@ def test_apply_converges_and_exits_0(files, monkeypatch):
 
 def test_unknown_edge_filter_is_error(files, monkeypatch, capsys):
     config, desired = files
-    monkeypatch.setattr(cli, "_build_providers", lambda cfg: {})
+    monkeypatch.setattr(cli, "_build_providers", lambda cfg, edges=None: {})
     code = cli.main(["--dry-run", "--config", str(config),
                      "--desired-from-file", str(desired), "--edge", "nope"])
     assert code == 1
@@ -89,11 +89,68 @@ def test_unknown_edge_filter_is_error(files, monkeypatch, capsys):
 
 def test_missing_desired_file_is_operational_error(files, monkeypatch, capsys):
     config, _ = files
-    monkeypatch.setattr(cli, "_build_providers", lambda cfg: {})
+    monkeypatch.setattr(cli, "_build_providers", lambda cfg, edges=None: {})
     code = cli.main(["--dry-run", "--config", str(config),
                      "--desired-from-file", "does-not-exist.json"])
     assert code == 1
     assert "error:" in capsys.readouterr().err
+
+
+def test_edge_filter_builds_only_selected_providers(tmp_path, monkeypatch, capsys):
+    """Verify that --edge filter prevents building providers for excluded edges.
+
+    This ensures operators don't need env vars (e.g., CLOUDFLARE_API_TOKEN)
+    for providers they're not using.
+    """
+    config_text = """
+[spatium]
+base_url = "http://spatium.invalid"
+
+[azure]
+resource_group = "rg-cham-lab"
+
+[[edges]]
+name = "azure-private"
+provider = "azure"
+zone = "azure.dwsolution.co"
+managed_keys = [["azure.dwsolution.co", "app", "A"]]
+
+[[edges]]
+name = "cloudflare-prod"
+provider = "cloudflare"
+zone = "example.com"
+managed_keys = [["example.com", "api", "A"]]
+"""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(config_text)
+
+    desired_file = tmp_path / "desired.json"
+    desired_file.write_text(json.dumps(
+        [{"zone": Z, "name": "app", "rtype": "A",
+          "values": ["10.10.4.30"], "ttl": 300}]))
+
+    # Mock _build_providers to track which edges it receives
+    built_edges = []
+
+    def mock_build(cfg, edges=None):
+        if edges is None:
+            edges = cfg.edges
+        built_edges.extend([e.name for e in edges])
+        # Only return the azure provider; cloudflare is not in the returned dict
+        return {"azure-private": FakeProvider([])}
+
+    monkeypatch.setattr(cli, "_build_providers", mock_build)
+
+    # Run with --edge azure-private filter
+    code = cli.main(["--dry-run", "--config", str(config_file),
+                     "--desired-from-file", str(desired_file),
+                     "--edge", "azure-private"])
+
+    # Verify: _build_providers received only the filtered edge
+    assert built_edges == ["azure-private"], \
+        f"Expected only ['azure-private'], got {built_edges}"
+    # Dry-run with drift should exit 2
+    assert code == 2
 
 
 def test_subprocess_entrypoint_contract():
