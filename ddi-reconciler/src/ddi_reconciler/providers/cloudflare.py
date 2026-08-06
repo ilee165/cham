@@ -12,6 +12,7 @@ Token: scoped API token — Zone.Zone:Read + Zone.DNS:Edit on this zone only.
 """
 from __future__ import annotations
 
+import ipaddress
 import requests
 
 from ddi_reconciler.model import SUPPORTED_RECORD_TYPES, CanonicalRecord, Diff
@@ -44,7 +45,7 @@ class CloudflareProvider:
         if self._zone_id is None:
             result = self._request("GET", f"/zones?name={self.zone_name}")["result"]
             if not result:
-                raise RuntimeError(f"cloudflare zone not found: {self.zone_name}")
+                raise RuntimeError(f"cloudflare API error: zone not found: {self.zone_name}")
             self._zone_id = result[0]["id"]
         return self._zone_id
 
@@ -69,7 +70,18 @@ class CloudflareProvider:
     def _match_key(rtype: str, content: str) -> str:
         # Mirror CanonicalRecord's domain-value normalization so canonical
         # values can look up raw API records regardless of case/trailing dot.
-        return content.rstrip(".").lower() if rtype in {"CNAME", "PTR"} else content
+        # CNAME/PTR: lowercase and strip trailing dot.
+        # AAAA: normalize IPv6 via ipaddress.IPv6Address (canonical form).
+        if rtype in {"CNAME", "PTR"}:
+            return content.rstrip(".").lower()
+        elif rtype == "AAAA":
+            try:
+                return str(ipaddress.IPv6Address(content))
+            except ValueError:
+                # Invalid IPv6; fall back to raw content to avoid crashing fetch-only paths
+                return content
+        else:
+            return content
 
     # --- provider contract --------------------------------------------------
     def fetch_actual(self, zones: set[str]) -> list[CanonicalRecord]:
@@ -120,11 +132,23 @@ class CloudflareProvider:
             for value in set(want.values) - set(have.values):
                 self._create(want, value)
             for value in set(have.values) - set(want.values):
+                if value not in existing:
+                    raise RuntimeError(
+                        f"cloudflare API state error: value {value!r} not in fetched index for {want.key}; "
+                        f"apply() requires fetch_actual() in the same run")
                 self._request("DELETE", f"/zones/{zone_id}/dns_records/{existing[value]['id']}")
             if want.ttl != have.ttl:
                 for value in set(want.values) & set(have.values):
+                    if value not in existing:
+                        raise RuntimeError(
+                            f"cloudflare API state error: value {value!r} not in fetched index for {want.key}; "
+                            f"apply() requires fetch_actual() in the same run")
                     self._request("PATCH", f"/zones/{zone_id}/dns_records/{existing[value]['id']}",
                                   json={"ttl": want.ttl})
         for record in diff.to_delete:
+            if record.key not in self._api_records or not self._api_records[record.key]:
+                raise RuntimeError(
+                    f"cloudflare API state error: no fetched records for {record.key}; "
+                    f"apply() requires fetch_actual() in the same run")
             for raw in self._api_records.get(record.key, []):
                 self._request("DELETE", f"/zones/{zone_id}/dns_records/{raw['id']}")
