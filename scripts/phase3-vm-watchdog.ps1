@@ -29,11 +29,15 @@ $ErrorActionPreference = 'Stop'
 
 $expectedResourceGroup = 'rg-cham-lab'
 $expectedVmNames = @('vm-hub-ddi', 'vm-test-app', 'vm-test-mgmt')
+# TrimEntries runs before empty-entry removal, so whitespace-only tokens
+# (e.g. 'vm-a, ,vm-b') are dropped cleanly instead of surviving as empty
+# strings and failing the count check below with a misleading message.
+# TrimEntries needs .NET 5+, guaranteed by the #Requires -Version 7.2 guard.
 $requestedVmNames = @(
     $VmNames.Split(
         ',',
-        [System.StringSplitOptions]::RemoveEmptyEntries
-    ) | ForEach-Object { $_.Trim() }
+        [System.StringSplitOptions] 'RemoveEmptyEntries, TrimEntries'
+    )
 )
 
 # Allowlist checks are uniformly case-insensitive, matching Azure's own
