@@ -1,3 +1,9 @@
+#Requires -Version 7.2
+# PowerShell 7.2+ is mandatory. Under Windows PowerShell 5.1, redirected
+# native stderr becomes a terminating error while $ErrorActionPreference is
+# 'Stop' (aborting the retry loops on the first az stderr line), and
+# ConvertFrom-Json does not enumerate JSON arrays (wedging verification in
+# the 'unknown' state forever). Arm via `pwsh -File`, never `powershell -File`.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
