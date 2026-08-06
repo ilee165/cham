@@ -86,7 +86,15 @@ function Write-PowerState {
 
     $timestamp = [System.DateTimeOffset]::UtcNow.ToString('o')
     $line = '{0} vm={1} power_state={2}' -f $timestamp, $VmName, $PowerState
-    Add-Content -LiteralPath $resolvedLogPath -Value $line -Encoding utf8
+    # Logging is best-effort telemetry: a transient log-write failure
+    # (antivirus hold, concurrent writer, disk full) must never abort the
+    # essential deallocation work.
+    try {
+        Add-Content -LiteralPath $resolvedLogPath -Value $line -Encoding utf8
+    }
+    catch {
+        Write-Warning ('watchdog log write failed: {0}' -f $_.Exception.Message)
+    }
 }
 
 # Native az stderr captured via 2>&1 arrives as ErrorRecord objects mixed
@@ -179,8 +187,10 @@ while ($pendingDeallocations.Count -gt 0) {
         )
         $deallocateOutput = @(& $azureCli @deallocateArguments 2>&1)
         if ($LASTEXITCODE -eq 0) {
-            Write-PowerState -VmName $vmName -PowerState 'deallocate_accepted'
+            # State first, telemetry second: a logging hiccup right after a
+            # successful deallocate must not leave the VM marked pending.
             $null = $pendingDeallocations.Remove($vmName)
+            Write-PowerState -VmName $vmName -PowerState 'deallocate_accepted'
         }
         else {
             Write-PowerState -VmName $vmName -PowerState (
