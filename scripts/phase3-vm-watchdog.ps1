@@ -36,7 +36,10 @@ $requestedVmNames = @(
     ) | ForEach-Object { $_.Trim() }
 )
 
-if ($ResourceGroup -cne $expectedResourceGroup) {
+# Allowlist checks are uniformly case-insensitive, matching Azure's own
+# name semantics; downstream az calls use the hard-coded constants
+# regardless, so casing never reaches the CLI arguments.
+if ($ResourceGroup -ne $expectedResourceGroup) {
     throw "ResourceGroup must be $expectedResourceGroup."
 }
 
