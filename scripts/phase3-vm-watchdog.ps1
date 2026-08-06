@@ -154,7 +154,8 @@ while ([System.DateTimeOffset]::UtcNow -lt $parsedDeadline) {
         250,
         [Math]::Max(1, [Math]::Ceiling($remaining.TotalMilliseconds))
     )
-    [System.Threading.Thread]::Sleep([int] $sleepMilliseconds)
+    # Start-Sleep (not Thread.Sleep) so Ctrl+C can interrupt the wait.
+    Start-Sleep -Milliseconds ([int] $sleepMilliseconds)
 }
 
 if ($DryRun) {
@@ -208,7 +209,7 @@ while ($pendingDeallocations.Count -gt 0) {
         }
     }
     if ($pendingDeallocations.Count -gt 0) {
-        [System.Threading.Thread]::Sleep(15000)
+        Start-Sleep -Milliseconds 15000
     }
 }
 
@@ -273,7 +274,7 @@ while ($pendingVmNames.Count -gt 0) {
     }
 
     if ($pendingVmNames.Count -gt 0) {
-        [System.Threading.Thread]::Sleep(15000)
+        Start-Sleep -Milliseconds 15000
     }
 }
 
