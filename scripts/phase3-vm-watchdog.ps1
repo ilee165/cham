@@ -245,8 +245,11 @@ while ($pendingVmNames.Count -gt 0) {
                     Where-Object { $_.code -like 'PowerState/*' } |
                     Select-Object -First 1
                 if ($null -ne $powerStatus) {
-                    $suffix = [string] $powerStatus.code -replace '^PowerState/', ''
-                    if ($suffix -match '^[a-z]+$') {
+                    # Normalize casing once so this shape check and the
+                    # case-sensitive 'VM deallocated' comparison below can
+                    # never disagree (e.g. a future 'PowerState/Deallocated').
+                    $suffix = ([string] $powerStatus.code -replace '^PowerState/', '').ToLowerInvariant()
+                    if ($suffix -cmatch '^[a-z]+$') {
                         $powerState = 'VM ' + $suffix
                     }
                 }
