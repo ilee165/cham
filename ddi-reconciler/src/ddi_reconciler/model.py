@@ -52,17 +52,17 @@ class CanonicalRecord:
         zone, name, rtype = canonical_record_key(self.zone, self.name, self.rtype)
 
         if not zone:
-            raise ValueError("zone is required")
+            raise ValueError("zone must not be empty")
         if not name:
-            raise ValueError("name is required")
+            raise ValueError("name must not be empty")
         if not rtype:
-            raise ValueError("rtype is required")
+            raise ValueError("record type must not be empty")
         if rtype not in SUPPORTED_RECORD_TYPES:
             raise ValueError(f"unsupported record type: {rtype!r}")
         if isinstance(self.ttl, bool) or not isinstance(self.ttl, int) or self.ttl < 0:
-            raise ValueError("ttl must be a non-negative integer")
+            raise ValueError("TTL must be a non-negative integer")
         if not self.values:
-            raise ValueError("values are required")
+            raise ValueError("values must not be empty")
         if any(not isinstance(value, str) for value in self.values):
             raise ValueError("record values must be non-empty strings")
 
@@ -86,7 +86,7 @@ class CanonicalRecord:
     def key(self) -> RecordKey:
         """Identity key: two records with the same key are the 'same' record
         and diff only in values/ttl (an UPDATE, not ADD and DELETE)"""
-        return RecordKey(self.zone, self.name, self.rtype)
+        return (self.zone, self.name, self.rtype)
 
 @dataclass(frozen=True)
 class RecordUpdate:

@@ -1,7 +1,7 @@
 """
 cham-reconcile cli entry point
 
-Usage (installed script, or `python -m cham.ddi-reconciler.cli`):
+Usage (installed script, or `python -m ddi_reconciler.cli`):
     cham-reconcile --dry-run # print diff, exit if drift found (CI signal)
     cham-reconcile --apply # apply changes to the cluster
 """
