@@ -3,7 +3,8 @@ variable "zone_name" {
   default = "dwsolution.co"
 }
 
-variable "www_public_ip" {
-  description = "Public target for www (e.g. Cloudflare Pages / placeholder)"
+variable "www_public_target" {
+  description = "Public www target hostname (GitHub Pages site)"
   type        = string
+  default     = "ilee165.github.io"
 }

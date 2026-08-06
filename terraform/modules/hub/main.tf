@@ -93,6 +93,21 @@ resource "azurerm_network_security_group" "hub" {
     destination_address_prefix = var.hub_vm_ip
   }
 
+  # Priority 125, not 130: 130 is already taken by AllowInternetTransitFromSpokes
+  # below (Inbound priorities must be unique within an NSG). Placed directly
+  # after the DNS rule to match the source brief's intended ordering.
+  security_rule {
+    name                       = "AllowHTTPInternal"
+    priority                   = 125
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "80"
+    source_address_prefixes    = ["10.10.0.0/16", "10.20.0.0/16", "172.16.0.0/24"]
+    destination_address_prefix = "*"
+  }
+
   security_rule {
     name                       = "AllowInternetTransitFromSpokes"
     priority                   = 130

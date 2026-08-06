@@ -32,12 +32,13 @@ data "cloudflare_zone" "apex" {
 }
 
 # The public answer for www — the split-horizon counterpart lives in the
-# internal BIND9 view and returns a private IP for the same name.
+# internal BIND9 override zone and returns the hub's private IP for the
+# same name.
 resource "cloudflare_record" "www" {
   zone_id = data.cloudflare_zone.apex.id
   name    = "www"
-  type    = "A"
-  content = var.www_public_ip
+  type    = "CNAME"
+  content = var.www_public_target
   ttl     = 300
   proxied = false # keep dig-able; proxying returns Cloudflare edge IPs
 }

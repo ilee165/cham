@@ -7,6 +7,7 @@ packages:
   - bind9
   - bind9-utils
   - iptables-persistent
+  - nginx
 
 write_files:
   - path: /etc/sysctl.d/99-forwarding.conf
@@ -63,6 +64,10 @@ write_files:
         iptables -t nat -A POSTROUTING -s 10.10.0.0/16 ! -d 10.0.0.0/8 -o "$outbound_interface" -j MASQUERADE
       fi
       netfilter-persistent save
+
+  - path: /var/www/html/index.html
+    content: |
+      <h1>INTERNAL — served from the hub over the tunnel</h1>
 
 runcmd:
   - sysctl --system
