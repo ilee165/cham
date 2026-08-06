@@ -40,3 +40,16 @@ def test_auth_header_sent_when_token_present():
     responses.get(f"{BASE}/api/v1/dns/zones", json=[])
     SpatiumProvider(BASE, token="sekrit").fetch_desired({"azure.dwsolution.co"})
     assert responses.calls[0].request.headers["Authorization"] == "Bearer sekrit"
+
+
+@responses.activate
+def test_preserves_explicit_ttl_zero():
+    responses.get(f"{BASE}/api/v1/dns/zones", json=[
+        {"id": 1, "name": "test.zone."},
+    ])
+    responses.get(f"{BASE}/api/v1/dns/zones/1/records", json=[
+        {"name": "zero.test.zone.", "type": "A", "value": "10.0.0.1", "ttl": 0},
+    ])
+    records = SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+    assert len(records) == 1
+    assert records[0].ttl == 0  # Must preserve explicit 0, not default to 300

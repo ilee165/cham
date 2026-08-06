@@ -56,7 +56,7 @@ class SpatiumProvider:
                 name = self._relative(rec["name"], zone_name)
                 entry = grouped.setdefault(
                     (zone_name, name, rtype),
-                    {"values": [], "ttl": int(rec.get("ttl") or 300)})
+                    {"values": [], "ttl": int(rec["ttl"]) if rec.get("ttl") is not None else 300})
                 entry["values"].append(str(rec["value"]))
         return [
             CanonicalRecord(zone=z, name=n, rtype=t,
