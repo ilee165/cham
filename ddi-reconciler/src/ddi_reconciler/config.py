@@ -9,7 +9,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from ddi_reconciler.model import RecordKey, canonical_record_key
+from ddi_reconciler.model import RecordKey, canonical_name, canonical_record_key
 
 
 class ConfigError(ValueError):
@@ -31,6 +31,14 @@ class Config:
     edges: tuple[EdgeConfig, ...]
 
 
+def _require_str(entry: dict, field: str) -> str:
+    value = entry.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(
+            f"invalid edge entry {entry!r}: {field!r} must be a non-empty string")
+    return value.strip()
+
+
 def load_config(path: Path) -> Config:
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -40,22 +48,44 @@ def load_config(path: Path) -> Config:
         raise ConfigError(f"invalid TOML in {path}: {exc}") from exc
 
     edges: list[EdgeConfig] = []
+    seen_names: set[str] = set()
     for entry in raw.get("edges", []):
+        if not isinstance(entry, dict):
+            raise ConfigError(f"invalid edge entry {entry!r}: expected a table")
+        name = _require_str(entry, "name")
+        provider = _require_str(entry, "provider")
+        # Same canonicalizer the managed keys use, so the two agree exactly.
+        zone = canonical_name(_require_str(entry, "zone"))
+
+        raw_keys = entry.get("managed_keys")
+        if not isinstance(raw_keys, list) or not raw_keys:
+            raise ConfigError(
+                f"invalid edge entry {entry!r}: 'managed_keys' must be a non-empty list")
         try:
-            edge = EdgeConfig(
-                name=entry["name"],
-                provider=entry["provider"],
-                zone=entry["zone"].strip().rstrip(".").lower(),
-                managed_keys=frozenset(
-                    canonical_record_key(zone, name, rtype)
-                    for zone, name, rtype in entry["managed_keys"]
-                ),
+            managed_keys = frozenset(
+                canonical_record_key(key_zone, key_name, key_rtype)
+                for key_zone, key_name, key_rtype in raw_keys
             )
-        except (KeyError, TypeError, ValueError) as exc:
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
             raise ConfigError(f"invalid edge entry {entry!r}: {exc}") from exc
-        if edge.provider not in {"azure", "cloudflare"}:
-            raise ConfigError(f"unknown provider {edge.provider!r} for edge {edge.name!r}")
-        edges.append(edge)
+
+        if provider not in {"azure", "cloudflare"}:
+            raise ConfigError(f"unknown provider {provider!r} for edge {name!r}")
+        # An edge may only own keys in its own zone. Caught here rather than
+        # deep inside diff_records, which is after provider credentials have
+        # been read and the edge API has already been called.
+        foreign = sorted(key for key in managed_keys if key[0] != zone)
+        if foreign:
+            raise ConfigError(
+                f"edge {name!r}: managed_keys outside the edge zone {zone!r}: {foreign}")
+        # Duplicate names collapse in the CLI's {edge.name: provider} dict and
+        # hand one edge another edge's provider (and therefore another zone).
+        if name in seen_names:
+            raise ConfigError(f"duplicate edge name: {name!r}")
+        seen_names.add(name)
+
+        edges.append(EdgeConfig(name=name, provider=provider, zone=zone,
+                                managed_keys=managed_keys))
     if not edges:
         raise ConfigError("config declares no edges")
 

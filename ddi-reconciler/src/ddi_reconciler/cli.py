@@ -12,17 +12,25 @@ import os
 import sys
 from pathlib import Path
 
-from ddi_reconciler.config import Config, ConfigError, load_config
+from ddi_reconciler.config import Config, ConfigError, EdgeConfig, load_config
 from ddi_reconciler.desired_file import load_desired, save_desired
 from ddi_reconciler.model import CanonicalRecord, Diff
-from ddi_reconciler.runner import ConvergenceError, apply_edge, plan_edge
+from ddi_reconciler.runner import apply_edge, plan_edge
 
 
-def _build_providers(config: Config, edges=None) -> dict:
+def _require_env(name: str) -> str:
+    """Read a required environment variable. Explicit, so that a KeyError from
+    a malformed API or snapshot payload is never mislabelled as a missing
+    environment variable."""
+    value = os.environ.get(name)
+    if not value:
+        raise ConfigError(f"missing required environment variable: {name}")
+    return value
+
+
+def _build_providers(config: Config, edges: tuple[EdgeConfig, ...]) -> dict:
     """Edge name -> constructed provider. Lazy imports keep file-mode dry-runs
     from paying the Azure SDK import cost. Tests monkeypatch this function."""
-    if edges is None:
-        edges = config.edges
     from ddi_reconciler.providers.azure import AzureProvider
     from ddi_reconciler.providers.cloudflare import CloudflareProvider
 
@@ -30,22 +38,31 @@ def _build_providers(config: Config, edges=None) -> dict:
     for edge in edges:
         if edge.provider == "azure":
             providers[edge.name] = AzureProvider(
-                subscription_id=os.environ["AZURE_SUBSCRIPTION_ID"],
+                subscription_id=_require_env("AZURE_SUBSCRIPTION_ID"),
                 resource_group=config.azure_resource_group)
         elif edge.provider == "cloudflare":
+            # managed_keys makes an unparseable record the reconciler *owns*
+            # fatal rather than skipped: a managed record it cannot read is
+            # invisible to the diff, which would plan an ADD over a live one.
+            # (AzureProvider reaches the same guarantee via blocked_keys /
+            # unparseable_keys, which runner.plan_edge consults.)
             providers[edge.name] = CloudflareProvider(
                 zone_name=edge.zone,
-                api_token=os.environ["CLOUDFLARE_API_TOKEN"])
+                api_token=_require_env("CLOUDFLARE_API_TOKEN"),
+                managed_keys=edge.managed_keys)
     return providers
 
 
-def _fetch_desired(config: Config, args: argparse.Namespace) -> list[CanonicalRecord]:
+def _fetch_desired(config: Config, args: argparse.Namespace,
+                   edges: tuple[EdgeConfig, ...]) -> list[CanonicalRecord]:
     if args.desired_from_file:
         return load_desired(Path(args.desired_from_file))
     from ddi_reconciler.providers.spatium import SpatiumProvider
     spatium = SpatiumProvider(base_url=config.spatium_base_url,
                               token=os.environ.get("SPATIUM_API_TOKEN", ""))
-    return spatium.fetch_desired({edge.zone for edge in config.edges})
+    # Zones come from the *selected* edges: --edge should not require truth for
+    # zones the run is not touching.
+    return spatium.fetch_desired({edge.zone for edge in edges})
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -59,15 +76,27 @@ class _ArgumentParser(argparse.ArgumentParser):
         raise SystemExit(1)
 
 
-def _print_diff(edge_name: str, diff: Diff) -> None:
+def _ttl(value: int) -> str:
+    """Render a TTL for humans. The Cloudflare adapter reports a sentinel when
+    an RRset's per-record TTLs disagree — the model carries one TTL per RRset,
+    so the split has to ride in that scalar. Printing the raw number would just
+    puzzle the operator; name the condition instead."""
+    from ddi_reconciler.providers.cloudflare import _SPLIT_TTL
+    return "split" if value == _SPLIT_TTL else str(value)
+
+
+def _print_diff(edge_name: str, diff: Diff,
+                dropped: tuple[CanonicalRecord, ...] = ()) -> None:
+    for r in sorted(dropped, key=lambda r: r.key):
+        print(f"[{edge_name}] SKIP   {r.name} {r.rtype} (not in managed_keys)")
     for r in sorted(diff.to_add, key=lambda r: r.key):
-        print(f"[{edge_name}] ADD    {r.name} {r.rtype} {','.join(r.values)} ttl={r.ttl}")
+        print(f"[{edge_name}] ADD    {r.name} {r.rtype} {','.join(r.values)} ttl={_ttl(r.ttl)}")
     for u in sorted(diff.to_update, key=lambda u: u.desired.key):
         print(f"[{edge_name}] UPDATE {u.desired.name} {u.desired.rtype} "
-              f"{','.join(u.actual.values)} ttl={u.actual.ttl} -> "
-              f"{','.join(u.desired.values)} ttl={u.desired.ttl}")
+              f"{','.join(u.actual.values)} ttl={_ttl(u.actual.ttl)} -> "
+              f"{','.join(u.desired.values)} ttl={_ttl(u.desired.ttl)}")
     for r in sorted(diff.to_delete, key=lambda r: r.key):
-        print(f"[{edge_name}] DELETE {r.name} {r.rtype} {','.join(r.values)} ttl={r.ttl}")
+        print(f"[{edge_name}] DELETE {r.name} {r.rtype} {','.join(r.values)} ttl={_ttl(r.ttl)}")
     if diff.is_converged:
         print(f"[{edge_name}] converged (0 changes)")
 
@@ -86,16 +115,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="read desired state from a JSON snapshot instead of SpatiumDDI (CI mode)")
     parser.add_argument("--edge", action="append", metavar="NAME",
                         help="limit to named edge(s); repeatable")
+    parser.add_argument("--allow-empty-truth", action="store_true",
+                        help="permit deleting every managed record of an edge when truth "
+                             "carries none (deliberately emptying a zone)")
+    parser.add_argument("--allow-snapshot-shrink", action="store_true",
+                        help="permit --export to overwrite a snapshot with fewer records")
     args = parser.parse_args(argv)
 
+    applied: list[str] = []
+    current: str | None = None
     try:
         config = load_config(Path(args.config))
-
-        if args.export is not None:
-            records = _fetch_desired(config, args)
-            save_desired(records, Path(args.export))
-            print(f"exported {len(records)} records to {args.export}")
-            return 0
 
         edges = config.edges
         if args.edge:
@@ -104,29 +134,62 @@ def main(argv: list[str] | None = None) -> int:
                 raise ConfigError(f"unknown edge(s): {', '.join(sorted(unknown))}")
             edges = tuple(e for e in edges if e.name in set(args.edge))
 
-        desired_all = _fetch_desired(config, args)
+        if args.export is not None:
+            records = _fetch_desired(config, args, edges)
+            save_desired(records, Path(args.export),
+                         allow_shrink=args.allow_snapshot_shrink)
+            print(f"exported {len(records)} records to {args.export}")
+            return 0
+
+        desired_all = _fetch_desired(config, args, edges)
         providers = _build_providers(config, edges)
+        # Defensive: a provider dict that does not cover every selected edge
+        # would otherwise KeyError, or (before duplicate names were rejected in
+        # load_config) hand an edge another edge's provider and another's zone.
+        missing = [e.name for e in edges if e.name not in providers]
+        if missing:
+            raise ConfigError(f"no provider constructed for edge(s): {', '.join(missing)}")
 
         adds = updates = deletes = 0
         for edge in edges:
+            current = edge.name
             run = apply_edge if args.apply else plan_edge
-            result = run(edge, desired_all, providers[edge.name])
-            _print_diff(edge.name, result.diff)
+            result = run(edge, desired_all, providers[edge.name],
+                         allow_empty_truth=args.allow_empty_truth)
+            _print_diff(edge.name, result.diff, result.dropped_desired)
+            changes = (len(result.diff.to_add) + len(result.diff.to_update)
+                       + len(result.diff.to_delete))
+            if args.apply and changes:
+                # Per-edge account, printed as each edge completes: a failure
+                # later in the loop must not hide what already landed.
+                applied.append(edge.name)
+                print(f"[{edge.name}] applied {changes} change(s)")
             adds += len(result.diff.to_add)
             updates += len(result.diff.to_update)
             deletes += len(result.diff.to_delete)
 
         drifted = bool(adds or updates or deletes)
-        applied = " — applied" if args.apply and drifted else ""
+        applied_note = " — applied" if args.apply and drifted else ""
         print(f"summary: {adds} add, {updates} update, {deletes} delete "
-              f"across {len(edges)} edge(s){applied}")
+              f"across {len(edges)} edge(s){applied_note}")
         return 2 if (args.dry_run and drifted) else 0
-    except KeyError as exc:
-        print(f"error: missing required environment variable: {exc.args[0]}", file=sys.stderr)
-        return 1
-    except (ConfigError, ConvergenceError, OSError, RuntimeError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        _report_partial_apply(args, current, applied)
         return 1
+    except BaseException:
+        # Ctrl-C mid-apply leaves the same mixed state a provider error does.
+        _report_partial_apply(args, current, applied)
+        raise
+
+
+def _report_partial_apply(args: argparse.Namespace, current: str | None,
+                          applied: list[str]) -> None:
+    if not args.apply or current is None:
+        return
+    done = ", ".join(applied) if applied else "none"
+    print(f"error: edge {current!r} did not complete and may be partially mutated; "
+          f"edge(s) fully applied before it: {done}", file=sys.stderr)
 
 
 if __name__ == "__main__":
