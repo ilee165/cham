@@ -119,6 +119,20 @@ function Get-FirstStderrLine {
     ([string] $firstLine -replace '\s+', ' ').Trim()
 }
 
+# -DryRun is a fast argument/allowlist validation: it short-circuits here,
+# before CLI resolution, the auth probe, and the deadline wait, so it needs
+# no Azure CLI installed, makes no Azure call, and returns immediately.
+# Output contract (relied on by verification): one DryRunNoMutation log
+# line per approved VM, then the two ok markers on stdout.
+if ($DryRun) {
+    foreach ($vmName in $expectedVmNames) {
+        Write-PowerState -VmName $vmName -PowerState 'DryRunNoMutation'
+    }
+    Write-Output 'watchdog_dry_run_ok=true'
+    Write-Output 'watchdog_vm_allowlist_ok=true'
+    return
+}
+
 $officialAzureCli = 'C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd'
 if (Test-Path -LiteralPath $officialAzureCli -PathType Leaf) {
     $azureCli = $officialAzureCli
@@ -156,15 +170,6 @@ while ([System.DateTimeOffset]::UtcNow -lt $parsedDeadline) {
     )
     # Start-Sleep (not Thread.Sleep) so Ctrl+C can interrupt the wait.
     Start-Sleep -Milliseconds ([int] $sleepMilliseconds)
-}
-
-if ($DryRun) {
-    foreach ($vmName in $expectedVmNames) {
-        Write-PowerState -VmName $vmName -PowerState 'DryRunNoMutation'
-    }
-    Write-Output 'watchdog_dry_run_ok=true'
-    Write-Output 'watchdog_vm_allowlist_ok=true'
-    return
 }
 
 # Round-robin: attempt every pending VM each cycle so one persistently
