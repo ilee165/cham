@@ -58,9 +58,29 @@ restarted for documentation validation.
 | Refresh-backed plan detailed exit code | `0` |
 | Plan result | `No changes` (0 warnings) |
 
-## Checkpoint D
+## Checkpoint D — destroy (executed 2026-08-06)
 
-Retain-or-destroy remains an explicit, separate operator decision. All
-compute is deallocated; idle non-compute charges continue for managed disks,
-the static hub public IP, Private DNS, networking metadata, and state
-storage.
+The operator explicitly chose Option 2 (destroy) and then separately
+approved the exact saved artifact before apply.
+
+| Step | Result |
+| --- | --- |
+| Fresh saved destroy plan from current state and `HEAD` (`5fb845e`) | `Plan: 0 to add, 0 to change, 36 to destroy` |
+| Complete deletion summary reviewed by operator | `true` |
+| Artifact SHA-256 approved | `900e717990e711a7f2b3a57b76cffc4c9aba56af6b7378a93647c6d1bbf43785` |
+| Hash re-verified immediately before apply | `true` |
+| Apply of that exact artifact | `0 added, 0 changed, 36 destroyed` (exit 0) |
+| Raw `terraform destroy` / `-auto-approve` used | `false` |
+
+Post-destroy verification:
+
+| Check | Result |
+| --- | --- |
+| `rg-cham-lab` exists | `false` |
+| Subscription-wide VMs / public IPs / Private DNS zones / budgets | `0 / 0 / 0 / 0` |
+| Resolver resources | `0` |
+| `rg-cham-tfstate` retained with bootstrap state storage | `true` (1 resource) |
+| Remaining resource groups | `NetworkWatcherRG`, `rg-cham-tfstate` |
+| Lab state addresses remaining | `0` |
+| Fresh recreation plan generates for review | `true` (`36 to add`, detailed exit `2`) |
+| Recreation plan applied | `false` |
