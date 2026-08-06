@@ -134,12 +134,22 @@ if ($DryRun) {
 
 # Round-robin: attempt every pending VM each cycle so one persistently
 # failing VM cannot starve deallocation requests for the others. Retries
-# remain indefinite; the operation set stays deallocate-only.
+# stay aggressive but are bounded: 30 minutes past the deadline the
+# watchdog fails loudly and exits non-zero, so a wedged run is
+# distinguishable from a working one. The operation set stays
+# deallocate-only.
+$retryBudget = $parsedDeadline.AddMinutes(30)
 $pendingDeallocations = [System.Collections.Generic.HashSet[string]]::new(
     [string[]] $expectedVmNames,
     [System.StringComparer]::Ordinal
 )
 while ($pendingDeallocations.Count -gt 0) {
+    if ([System.DateTimeOffset]::UtcNow -gt $retryBudget) {
+        foreach ($vmName in $pendingDeallocations) {
+            Write-PowerState -VmName $vmName -PowerState 'deallocate_FAILED_budget_exhausted'
+        }
+        throw 'Watchdog retry budget exhausted; manual deallocation required.'
+    }
     foreach ($vmName in @($pendingDeallocations)) {
         $deallocateArguments = @(
             'vm', 'deallocate',
@@ -167,6 +177,13 @@ $pendingVmNames = [System.Collections.Generic.HashSet[string]]::new(
     [System.StringComparer]::Ordinal
 )
 while ($pendingVmNames.Count -gt 0) {
+    if ([System.DateTimeOffset]::UtcNow -gt $retryBudget) {
+        foreach ($vmName in $pendingVmNames) {
+            Write-PowerState -VmName $vmName -PowerState 'verify_FAILED_budget_exhausted'
+        }
+        Write-Output 'watchdog_deallocation_UNVERIFIED=true'
+        throw 'Watchdog verification budget exhausted; manual verification required.'
+    }
     foreach ($vmName in @($pendingVmNames)) {
         $statusArguments = @(
             'vm', 'get-instance-view',
