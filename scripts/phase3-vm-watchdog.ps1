@@ -103,9 +103,12 @@ else {
 
 # Arm-time read-only authentication probe: a broken/expired token must fail
 # loudly at arm, not degrade into silent unknown-state polling at deadline.
+# `account show` only reads the cached local profile and cannot detect an
+# expired or revoked token; `account get-access-token` forces a real token
+# acquisition against Azure AD while remaining read-only.
 # Skipped in -DryRun, which must make no Azure call.
 if (-not $DryRun) {
-    & $azureCli account show --only-show-errors *> $null
+    & $azureCli account get-access-token --output none --only-show-errors *> $null
     if ($LASTEXITCODE -ne 0) {
         throw 'Azure CLI authentication probe failed at arm time.'
     }
