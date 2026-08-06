@@ -95,6 +95,16 @@ else {
     $azureCli = $azureCommand.Source
 }
 
+# Arm-time read-only authentication probe: a broken/expired token must fail
+# loudly at arm, not degrade into silent unknown-state polling at deadline.
+# Skipped in -DryRun, which must make no Azure call.
+if (-not $DryRun) {
+    & $azureCli account show --only-show-errors *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Azure CLI authentication probe failed at arm time.'
+    }
+}
+
 while ([System.DateTimeOffset]::UtcNow -lt $parsedDeadline) {
     $remaining = $parsedDeadline - [System.DateTimeOffset]::UtcNow
     $sleepMilliseconds = [Math]::Min(
@@ -113,8 +123,15 @@ if ($DryRun) {
     return
 }
 
-foreach ($vmName in $expectedVmNames) {
-    do {
+# Round-robin: attempt every pending VM each cycle so one persistently
+# failing VM cannot starve deallocation requests for the others. Retries
+# remain indefinite; the operation set stays deallocate-only.
+$pendingDeallocations = [System.Collections.Generic.HashSet[string]]::new(
+    [string[]] $expectedVmNames,
+    [System.StringComparer]::Ordinal
+)
+while ($pendingDeallocations.Count -gt 0) {
+    foreach ($vmName in @($pendingDeallocations)) {
         $deallocateArguments = @(
             'vm', 'deallocate',
             '--resource-group', $expectedResourceGroup,
@@ -123,12 +140,17 @@ foreach ($vmName in $expectedVmNames) {
             '--only-show-errors'
         )
         & $azureCli @deallocateArguments *> $null
-        $accepted = $LASTEXITCODE -eq 0
-        if (-not $accepted) {
-            Write-PowerState -VmName $vmName -PowerState 'unknown'
-            [System.Threading.Thread]::Sleep(15000)
+        if ($LASTEXITCODE -eq 0) {
+            Write-PowerState -VmName $vmName -PowerState 'deallocate_accepted'
+            $null = $pendingDeallocations.Remove($vmName)
         }
-    } until ($accepted)
+        else {
+            Write-PowerState -VmName $vmName -PowerState 'deallocate_retry_pending'
+        }
+    }
+    if ($pendingDeallocations.Count -gt 0) {
+        [System.Threading.Thread]::Sleep(15000)
+    }
 }
 
 $pendingVmNames = [System.Collections.Generic.HashSet[string]]::new(
