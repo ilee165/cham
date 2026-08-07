@@ -1550,17 +1550,43 @@ Both answers existing simultaneously **is** the split horizon.
 
 *Depends on A1, A2, and Phase 2 Task 3 (backend storage account pinned).*
 
-- [ ] **Step 1: Init + plan + apply**
+- [x] **Step 1: Init + plan + apply** — done 2026-08-07
 
 ```bash
 cd terraform/cloudflare
-terraform init
+terraform init -backend-config=backend.auto.tfbackend
 terraform plan    # expect: 2 to add (www CNAME, external-check TXT)
 terraform apply
 ```
 (The provider reads `CLOUDFLARE_API_TOKEN` from the environment; the backend uses the same storage account as the lab stack with key `cloudflare.tfstate` — ADR-004's split-state story.)
 
-- [ ] **Step 2: Verify from the outside world**
+`init` needs the explicit `-backend-config` because `plan.yml`'s static job
+inits this directory with `-backend=false`, which leaves a `.terraform/`
+carrying providers but no backend.
+
+Plan matched the expectation exactly — `2 to add, 0 to change, 0 to destroy`
+— and applied clean: `lab_marker` `87842aa4…`, `www` `108aa676…`. A second
+`plan -detailed-exitcode` returned 0, so the stack is idempotent.
+
+**`dwsolution.co` is a live production zone, not a lab one.** It carries the
+Microsoft 365 records this domain's mail actually depends on: `MX` →
+`dwsolution-co.mail.protection.outlook.com`, the SPF `TXT`, the `MS=`
+verification `TXT`, plus `autodiscover` / `sip` / `lyncdiscover` /
+`enterpriseenrollment` / `enterpriseregistration` and two `SRV` records.
+Nothing here may ever delete by magnitude or by sweep. Two properties keep
+that true, and both were verified against the live zone after this apply:
+
+- Terraform manages only the two resources in its own state and has no
+  `cloudflare_zone` resource, so it cannot remove a record it did not
+  create. `allow_overwrite = false` means a surprise collision fails the
+  apply rather than clobbering the incumbent.
+- The reconciler's ADR-005 `managed_keys` for this edge is `demo`/CNAME and
+  `reconciler-check`/TXT — disjoint from every record above, including the
+  two this task creates. A dry-run against the post-apply zone read all 12
+  records and reported `2 add, 0 update, 0 delete`. Zero deletes is the
+  allowlist proving itself on real infrastructure rather than on a fixture.
+
+- [x] **Step 2: Verify from the outside world** — DNS verified; HTTPS pending cert
 
 ```bash
 dig +short www.dwsolution.co @1.1.1.1
@@ -1569,12 +1595,33 @@ curl -s https://www.dwsolution.co | head -1
 ```
 Expected: CNAME chain to the Pages host resolving to real IPs; `"resolved-via=cloudflare-public"`; `<h1>PUBLIC — resolved via Cloudflare</h1>` (allow time for the Pages TLS cert after A2 Step 1).
 
-- [ ] **Step 3: Verify the state split**
+`www.dwsolution.co` → `ilee165.github.io` → `185.199.108-111.153` (+ AAAA), and
+`external-check.dwsolution.co` returns `"resolved-via=cloudflare-public"`, both
+from `1.1.1.1`. The page serves the expected `<h1>PUBLIC — resolved via
+Cloudflare</h1>` over **HTTP**.
+
+**HTTPS is not yet available**, and the reason is ordering rather than
+misconfiguration: `repos/ilee165/www-dwsolution/pages` already had
+`cname: www.dwsolution.co` set on 2026-08-06, a day before this apply created
+the DNS record. GitHub requests a Let's Encrypt certificate only once the
+custom domain resolves, so that first attempt had nothing to validate and
+`https_certificate` is still `NONE`; the TLS handshake falls back to the
+`*.github.io` wildcard, whose SANs do not cover this domain. Now that the
+CNAME resolves, GitHub re-provisions on its own. If it has not within ~24h,
+remove and re-add the custom domain in repo settings to force revalidation.
+`https_enforced` can only be turned on after the certificate exists.
+
+- [x] **Step 3: Verify the state split** — done 2026-08-07
 
 ```bash
 az storage blob list --account-name <stchamtfXXXXXX> -c tfstate --auth-mode login -o table
 ```
 Expected: two blobs — `lab.tfstate` and `cloudflare.tfstate`.
+
+Both present in `rg-cham-tfstate` / `<stchamtfXXXXXX>`: `lab.tfstate` (3238 B)
+and `cloudflare.tfstate` (3670 B, written by this apply). Confirms ADR-004's
+split — the Cloudflare stack shares the backend but not the state file, so a
+destroy of the lab stack cannot touch public DNS.
 
 ---
 

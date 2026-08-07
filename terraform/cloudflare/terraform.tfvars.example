@@ -1,6 +1,16 @@
 # Copy to terraform.tfvars (gitignored) and fill in.
 # Provider credential comes from the CLOUDFLARE_API_TOKEN env var (scoped
 # token, Zone:DNS:Edit only) — never from tfvars.
+#
+# Operator runs keep that token in ./.env.local (gitignored via *.env.local):
+#
+#   set -a; . ./.env.local; set +a
+#   terraform init -backend-config=backend.auto.tfbackend
+#   terraform plan -out=tfplan && terraform apply tfplan
+#
+# The token also needs Zone:Zone:Read — data.cloudflare_zone.apex resolves the
+# zone by name (GET /zones?name=...), which DNS:Edit alone does not permit.
+# Cloudflare's "Edit zone DNS" template includes it; a hand-built token may not.
 zone_name = "dwsolution.co"
 # www_public_target has a default (ilee165.github.io); override only if the
 # public www target (e.g. Pages site) changes.
