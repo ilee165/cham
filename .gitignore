@@ -32,3 +32,7 @@ graphify-out/
 
 # SDD scratch workspaces
 .superpowers/
+
+# Local, uncommitted credentials for operator runs (never commit)
+.env.local
+*.env.local
