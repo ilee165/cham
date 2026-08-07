@@ -3,7 +3,7 @@ Being able to test the core with zero cloud credentials is part of the
 design story."""
 import pytest
 
-from ddi_reconciler.model import CanonicalRecord, RecordUpdate
+from ddi_reconciler.model import CanonicalRecord, RecordUpdate, canonical_record_key
 from ddi_reconciler.reconcile import diff_records
 
 Z = "azure.dwsolution.co"
@@ -304,3 +304,61 @@ def test_invalid_canonical_records_are_rejected(overrides, message):
 
     with pytest.raises(ValueError, match=message):
         CanonicalRecord(**fields)
+
+
+@pytest.mark.parametrize("name", [
+    "weird name/../",     # the reproduced truth payload
+    "-leading-hyphen",
+    "trailing-hyphen-",
+    "a..b",               # empty label
+    "bad$char",
+    "a" * 64,             # label longer than 63 octets
+    "x." + "y" * 64,
+])
+def test_malformed_record_names_are_rejected(name):
+    """Names reach a Cloudflare JSON body and an Azure ARM path segment, so
+    garbage from truth must be named here, not surface as an opaque API 400."""
+    with pytest.raises(ValueError, match="invalid DNS name"):
+        rec(name, "10.10.4.20")
+
+
+@pytest.mark.parametrize("name", ["app", "@", "*", "*.wild", "_dmarc", "a-b.c-d", "a" * 63])
+def test_legitimate_record_names_are_accepted(name):
+    assert rec(name, "10.10.4.20").name == name
+
+
+def test_over_long_names_are_rejected():
+    with pytest.raises(ValueError, match="invalid DNS name"):
+        rec(".".join(["label"] * 45), "10.10.4.20")  # 269 chars
+
+
+def test_unicode_and_punycode_names_are_one_identity():
+    """A managed key spelled in unicode and the A-label the edge actually
+    serves must be the same record, not two."""
+    unicode_key = canonical_record_key(Z, "démo", "A")
+    a_label = "démo".encode("idna").decode("ascii")
+
+    assert unicode_key == canonical_record_key(Z, a_label, "A")
+    assert unicode_key[1] == a_label
+    assert rec("DÉMO", "10.10.4.20").name == a_label
+
+
+@pytest.mark.parametrize("rtype", ["CNAME", "PTR"])
+def test_unicode_and_punycode_targets_are_one_identity(rtype):
+    """A CNAME/PTR value IS a DNS name. Names were punycoded and values were
+    not, so a unicode target and the A-label the edge serves were two
+    identities — permanent drift that no apply could ever close."""
+    a_label = "démo".encode("idna").decode("ascii") + ".example.com"
+
+    assert rec("app", "DÉMO.Example.com.", rtype=rtype).values == (a_label,)
+    assert (rec("app", "démo.example.com", rtype=rtype).values
+            == rec("app", a_label, rtype=rtype).values)
+
+
+def test_a_unicode_target_does_not_read_as_drift_against_its_a_label():
+    desired = rec("app", "démo.example.com", rtype="CNAME")
+    actual = rec("app", "xn--dmo-bma.example.com", rtype="CNAME")
+
+    d = diff_records([desired], [actual], MANAGED, managed_keys={desired.key})
+
+    assert d.to_update == [] and d.to_add == [] and d.to_delete == []

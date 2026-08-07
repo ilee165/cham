@@ -9,6 +9,7 @@ from ddi_reconciler.model import (
     Diff,
     RecordKey,
     RecordUpdate,
+    canonical_name,
     canonical_record_key,
 )
 
@@ -36,9 +37,7 @@ def diff_records(desired: list[CanonicalRecord],
     present in managed_keys, so unrelated records in a managed zone are never
     updated or deleted.
     """
-    normalized_managed_zones = {
-        zone.strip().lower().rstrip(".") for zone in managed_zones
-    }
+    normalized_managed_zones = {canonical_name(zone) for zone in managed_zones}
     for record in desired:
         if record.zone.lower().rstrip(".") not in normalized_managed_zones:
             raise ValueError(

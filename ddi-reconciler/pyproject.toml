@@ -6,14 +6,21 @@ build-backend = "hatchling.build"
 name = "ddi-reconciler"
 version = "0.1.0"
 description = "Reconciler v2 — converges Azure Private DNS and Cloudflare toward SpatiumDDI truth"
-requires-python = ">=3.10"
-dependencies = []
+requires-python = ">=3.11"
+dependencies = [
+  "requests>=2.32",
+  "azure-identity>=1.17",
+  "azure-mgmt-privatedns>=1.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ddi_reconciler"]
 
 [project.scripts]
 cham-reconcile = "ddi_reconciler.cli:main"
 
 [dependency-groups]
-dev = ["pytest"]
+dev = ["pytest", "responses>=0.25"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["ddi_reconciler"]

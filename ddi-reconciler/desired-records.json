@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "truth_verified": true,
+  "count": 3,
+  "checksum": "sha256:5e8e62ff50f30b648a11a20df26165ad907d69e03645f55840cbd5a008e0fb29",
+  "records": [
+    {
+      "zone": "azure.dwsolution.co",
+      "name": "app",
+      "rtype": "A",
+      "values": [
+        "10.10.4.30"
+      ],
+      "ttl": 300
+    },
+    {
+      "zone": "dwsolution.co",
+      "name": "demo",
+      "rtype": "CNAME",
+      "values": [
+        "www.dwsolution.co"
+      ],
+      "ttl": 300
+    },
+    {
+      "zone": "dwsolution.co",
+      "name": "reconciler-check",
+      "rtype": "TXT",
+      "values": [
+        "managed-by=ddi-reconciler"
+      ],
+      "ttl": 300
+    }
+  ]
+}

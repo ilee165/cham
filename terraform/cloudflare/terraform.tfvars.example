@@ -1,5 +1,7 @@
 # Copy to terraform.tfvars (gitignored) and fill in.
 # Provider credential comes from the CLOUDFLARE_API_TOKEN env var (scoped
 # token, Zone:DNS:Edit only) — never from tfvars.
-zone_name     = "dwsolution.co"
-www_public_ip = "203.0.113.10" # public answer for www — the external half of the split horizon
+zone_name = "dwsolution.co"
+# www_public_target has a default (ilee165.github.io); override only if the
+# public www target (e.g. Pages site) changes.
+# www_public_target = "ilee165.github.io"

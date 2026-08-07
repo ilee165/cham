@@ -1,0 +1,355 @@
+"""Per-edge orchestration with a fake provider — offline."""
+import pytest
+
+from ddi_reconciler.config import EdgeConfig
+from ddi_reconciler.model import CanonicalRecord
+from ddi_reconciler.runner import (
+    ConvergenceError,
+    EmptyTruthError,
+    OwnershipError,
+    UnverifiedTruthError,
+    UnwritableKeyError,
+    apply_edge,
+    plan_edge,
+)
+
+Z = "azure.dwsolution.co"
+EDGE = EdgeConfig(name="azure-private", provider="azure", zone=Z,
+                  managed_keys=frozenset({(Z, "app", "A")}))
+
+
+def rec(name, value, zone=Z):
+    return CanonicalRecord(zone=zone, name=name, rtype="A", values=(value,))
+
+
+class FakeProvider:
+    def __init__(self, actual, stubborn=False):
+        self.actual = list(actual)
+        self.stubborn = stubborn
+        self.apply_calls = 0
+
+    def fetch_actual(self, zones):
+        return list(self.actual)
+
+    def apply(self, diff):
+        self.apply_calls += 1
+        if self.stubborn:
+            return
+        for r in diff.to_delete:
+            self.actual = [a for a in self.actual if a.key != r.key]
+        for u in diff.to_update:
+            self.actual = [a for a in self.actual if a.key != u.actual.key] + [u.desired]
+        self.actual.extend(diff.to_add)
+
+
+def test_plan_edge_filters_desired_to_managed_set():
+    desired_all = [rec("app", "10.10.4.30"), rec("db", "10.10.4.20"),
+                   rec("other", "1.2.3.4", zone="unrelated.zone")]
+    result = plan_edge(EDGE, desired_all, FakeProvider([]))
+    assert [r.name for r in result.diff.to_add] == ["app"]  # db + other filtered out
+
+
+def test_apply_edge_converges_and_reports_pre_apply_diff():
+    provider = FakeProvider([])
+    result = apply_edge(EDGE, [rec("app", "10.10.4.30")], provider)
+    assert provider.apply_calls == 1
+    assert [r.name for r in result.diff.to_add] == ["app"]
+    assert plan_edge(EDGE, [rec("app", "10.10.4.30")], provider).diff.is_converged
+
+
+def test_apply_edge_skips_apply_when_converged():
+    provider = FakeProvider([rec("app", "10.10.4.30")])
+    apply_edge(EDGE, [rec("app", "10.10.4.30")], provider)
+    assert provider.apply_calls == 0
+
+
+def test_apply_edge_raises_when_still_drifted():
+    provider = FakeProvider([], stubborn=True)
+    with pytest.raises(ConvergenceError, match="still drifted after apply"):
+        apply_edge(EDGE, [rec("app", "10.10.4.30")], provider)
+
+
+# --- CR-1: empty truth is not a delete order -------------------------------
+
+def test_empty_truth_refuses_to_delete_every_managed_record():
+    """Spatium reset / re-scoped token / truncated snapshot all look exactly
+    like 'these records should not exist'. Only one of them may delete."""
+    provider = FakeProvider([rec("app", "10.10.4.30")])
+    with pytest.raises(EmptyTruthError, match="--allow-empty-truth"):
+        plan_edge(EDGE, [], provider)
+
+
+def test_empty_truth_guard_also_covers_apply_and_runs_before_any_mutation():
+    provider = FakeProvider([rec("app", "10.10.4.30")])
+    with pytest.raises(EmptyTruthError):
+        apply_edge(EDGE, [], provider)
+    assert provider.apply_calls == 0
+    assert provider.actual  # nothing deleted
+
+
+def test_empty_truth_guard_ignores_records_for_other_zones():
+    """Truth that carries only another edge's zone is still empty for us."""
+    provider = FakeProvider([rec("app", "10.10.4.30")])
+    with pytest.raises(EmptyTruthError):
+        plan_edge(EDGE, [rec("elsewhere", "1.2.3.4", zone="other.zone")], provider)
+
+
+def test_empty_truth_is_allowed_with_explicit_opt_in():
+    provider = FakeProvider([rec("app", "10.10.4.30")])
+    result = apply_edge(EDGE, [], provider, truth_complete=True, allow_empty_truth=True)
+    assert [r.name for r in result.diff.to_delete] == ["app"]
+    assert provider.actual == []
+
+
+def test_empty_truth_guard_does_not_fire_when_there_is_nothing_to_delete():
+    """An edge that already serves nothing is converged, not a data-loss risk."""
+    assert plan_edge(EDGE, [], FakeProvider([])).diff.is_converged
+
+
+# --- WR-12: a desired record that names a managed key must not be dropped ---
+
+def test_desired_record_written_as_an_fqdn_is_rejected_not_silently_dropped():
+    """The key pre-filter used to drop this, leaving the managed key with an
+    empty desired set — which deletes the live record and exits 0."""
+    typo = CanonicalRecord(zone=Z, name=f"app.{Z}", rtype="A", values=("10.10.4.30",))
+    provider = FakeProvider([rec("app", "10.10.4.30")])
+    with pytest.raises(OwnershipError, match="names managed key"):
+        plan_edge(EDGE, [typo], provider)
+
+
+def test_desired_record_with_the_wrong_zone_name_split_is_rejected():
+    """Same DNS name, different (zone, name) split: app.azure + dwsolution.co
+    is the same name as app + azure.dwsolution.co."""
+    split = CanonicalRecord(zone="dwsolution.co", name="app.azure", rtype="A",
+                            values=("10.10.4.30",))
+    with pytest.raises(OwnershipError, match="names managed key"):
+        plan_edge(EDGE, [split], FakeProvider([rec("app", "10.10.4.30")]))
+
+
+def test_unowned_records_in_the_managed_zone_are_reported_not_rejected():
+    """Truth legitimately models more than the reconciler owns (Terraform
+    seeds), so those are dropped — but visibly, not silently."""
+    result = plan_edge(EDGE, [rec("app", "10.10.4.30"), rec("db", "10.10.4.20")],
+                       FakeProvider([]))
+    assert [r.name for r in result.diff.to_add] == ["app"]
+    assert [r.name for r in result.dropped_desired] == ["db"]
+
+
+def test_records_for_other_zones_are_not_reported_as_dropped():
+    result = plan_edge(EDGE, [rec("app", "10.10.4.30"),
+                              rec("other", "1.2.3.4", zone="unrelated.zone")],
+                       FakeProvider([]))
+    assert result.dropped_desired == ()
+
+
+class BlockingProvider(FakeProvider):
+    """A provider that read a record set it refuses to write — Azure VM
+    auto-registration owns it, or it could not be parsed. Such keys are absent
+    from fetch_actual(), so the diff cannot see them."""
+
+    def __init__(self, actual, blocked_keys=(), unparseable_keys=()):
+        super().__init__(actual)
+        self.blocked_keys = set(blocked_keys)
+        self.unparseable_keys = set(unparseable_keys)
+
+
+@pytest.mark.parametrize("attr", ["blocked_keys", "unparseable_keys"])
+def test_managed_key_the_provider_will_not_write_fails_the_plan(attr):
+    """Without this the key plans as ADD — an upsert onto an auto-registered
+    record set — and only fails at apply, after the plan claimed it would work."""
+    provider = BlockingProvider([], **{attr: {(Z, "app", "A")}})
+    with pytest.raises(UnwritableKeyError, match="will not write them"):
+        plan_edge(EDGE, [rec("app", "10.10.4.30")], provider)
+
+
+def test_unwritable_keys_outside_the_managed_set_are_ignored():
+    """The reconciler disclaims them, so they are none of its business."""
+    provider = BlockingProvider([], blocked_keys={(Z, "vm-test-01", "A")})
+    result = plan_edge(EDGE, [rec("app", "10.10.4.30")], provider)
+    assert [r.name for r in result.diff.to_add] == ["app"]
+
+
+def test_providers_without_the_attributes_are_unaffected():
+    """The hook is duck-typed: Cloudflare exposes neither set."""
+    assert plan_edge(EDGE, [rec("app", "10.10.4.30")], FakeProvider([])).diff.to_add
+
+
+# --- CR-1: PARTIAL truth is not a delete order either -----------------------
+
+PAIR = EdgeConfig(name="pair", provider="azure", zone=Z,
+                  managed_keys=frozenset({(Z, "app", "A"), (Z, "db", "A")}))
+BOTH_LIVE = [rec("app", "10.10.4.30"), rec("db", "10.10.4.20")]
+
+
+def test_partial_truth_refuses_to_delete_what_it_does_not_mention():
+    """Truth carries `app` but not `db` while the edge serves both. Empty truth
+    was already guarded; this is the same loss one record at a time, and it
+    used to delete `db` and exit 0."""
+    provider = FakeProvider(BOTH_LIVE)
+    with pytest.raises(UnverifiedTruthError, match="could not be proven complete"):
+        plan_edge(PAIR, [rec("app", "10.10.4.30")], provider, truth_complete=False)
+
+
+def test_partial_truth_guard_covers_apply_and_runs_before_any_mutation():
+    provider = FakeProvider(BOTH_LIVE)
+    with pytest.raises(UnverifiedTruthError):
+        apply_edge(PAIR, [rec("app", "10.10.4.30")], provider, truth_complete=False)
+    assert provider.apply_calls == 0
+    assert len(provider.actual) == 2  # nothing deleted
+
+
+def test_a_proven_complete_read_still_deletes_what_it_drops():
+    """The case that must NOT break: truth verifiably no longer carries `db`,
+    so `db` is deleted. A completeness gate that blocked this would just be a
+    delete ceiling wearing a different hat."""
+    provider = FakeProvider(BOTH_LIVE)
+    result = apply_edge(PAIR, [rec("app", "10.10.4.30")], provider, truth_complete=True)
+    assert [r.name for r in result.diff.to_delete] == ["db"]
+    assert [r.name for r in provider.actual] == ["app"]
+
+
+def test_an_unproven_read_still_adds_and_updates():
+    """Deletion is the destructive direction and the only one gated. An
+    unprovable read can still converge everything it does say."""
+    provider = FakeProvider([rec("db", "10.10.4.20")])
+    result = plan_edge(PAIR, [rec("app", "10.10.4.30"), rec("db", "10.10.4.99")],
+                       provider, truth_complete=False)
+    assert [r.name for r in result.diff.to_add] == ["app"]
+    assert [u.desired.name for u in result.diff.to_update] == ["db"]
+    assert result.diff.to_delete == []
+
+
+def test_an_unproven_read_that_deletes_nothing_is_fine():
+    provider = FakeProvider(BOTH_LIVE)
+    assert plan_edge(PAIR, BOTH_LIVE, provider, truth_complete=False).diff.is_converged
+
+
+def test_unproven_deletions_are_allowed_with_the_explicit_opt_in():
+    provider = FakeProvider(BOTH_LIVE)
+    result = apply_edge(PAIR, [rec("app", "10.10.4.30")], provider,
+                        truth_complete=False, allow_unverified_truth=True)
+    assert [r.name for r in result.diff.to_delete] == ["db"]
+
+
+def test_deletions_are_refused_by_default_when_completeness_is_not_stated():
+    """Fail closed: a caller that never establishes completeness must not get
+    the trusting answer by omission."""
+    with pytest.raises(UnverifiedTruthError):
+        plan_edge(PAIR, [rec("app", "10.10.4.30")], FakeProvider(BOTH_LIVE))
+
+
+# --- WR-12 false positive: a near miss needs the key to be uncovered --------
+
+CF = EdgeConfig(name="cloudflare-public", provider="cloudflare", zone="dwsolution.co",
+                managed_keys=frozenset({("dwsolution.co", "demo", "A")}))
+
+
+def test_a_record_in_another_zone_that_looks_like_an_fqdn_is_not_a_near_miss():
+    """`demo.dwsolution.co` is a legal record NAME inside azure.dwsolution.co.
+    Reading it as an FQDN regardless of its own zone aborted the cloudflare
+    edge even with the real `demo` record right there in truth."""
+    truth = [
+        CanonicalRecord(zone=Z, name="demo.dwsolution.co", rtype="A",
+                        values=("10.10.4.9",)),
+        rec("demo", "1.2.3.4", zone="dwsolution.co"),
+    ]
+    result = plan_edge(CF, truth, FakeProvider([]), truth_complete=True)
+    assert [r.name for r in result.diff.to_add] == ["demo"]
+    assert result.dropped_desired == ()   # the other zone's record is not ours
+
+
+def test_a_genuine_typo_still_raises_when_nothing_covers_the_key():
+    """The protection this guard exists for must survive the fix: with no
+    proper `demo` record, ignoring the mis-split one empties the key."""
+    typo = CanonicalRecord(zone="dwsolution.co", name="demo.dwsolution.co", rtype="A",
+                           values=("1.2.3.4",))
+    with pytest.raises(OwnershipError, match="names managed key"):
+        plan_edge(CF, [typo], FakeProvider([]), truth_complete=True)
+
+
+def test_a_covered_near_miss_in_our_own_zone_is_reported_as_a_skip():
+    """Demoted from fatal to unowned — but still printed, never silent."""
+    truth = [
+        rec("demo", "1.2.3.4", zone="dwsolution.co"),
+        CanonicalRecord(zone="dwsolution.co", name="demo.dwsolution.co", rtype="A",
+                        values=("9.9.9.9",)),
+    ]
+    result = plan_edge(CF, truth, FakeProvider([]), truth_complete=True)
+    assert [r.name for r in result.dropped_desired] == ["demo.dwsolution.co"]
+
+
+# --- CR-5: a split RRset drifts through the key set, not through the TTL ----
+
+class SplitProvider(FakeProvider):
+    def __init__(self, actual, split_ttl_keys=()):
+        super().__init__(actual)
+        self.split_ttl_keys = set(split_ttl_keys)
+
+    def apply(self, diff):
+        super().apply(diff)
+        self.split_ttl_keys.clear()   # apply() normalizes the set
+
+
+def test_a_split_rrset_drifts_even_when_its_reported_ttl_matches():
+    """The whole CR-5 regression in one assertion: values and TTL agree, so the
+    diff alone says converged, and the edge is still serving two TTLs."""
+    live = rec("app", "10.10.4.30")
+    provider = SplitProvider([live], split_ttl_keys={(Z, "app", "A")})
+    result = plan_edge(EDGE, [live], provider, truth_complete=True)
+    assert not result.diff.is_converged
+    assert [u.desired.key for u in result.diff.to_update] == [(Z, "app", "A")]
+    assert result.split_ttl_keys == ((Z, "app", "A"),)
+
+
+def test_a_split_rrset_converges_after_apply():
+    live = rec("app", "10.10.4.30")
+    provider = SplitProvider([live], split_ttl_keys={(Z, "app", "A")})
+    apply_edge(EDGE, [live], provider, truth_complete=True)
+    assert provider.apply_calls == 1
+
+
+def test_a_split_key_already_drifting_is_not_updated_twice():
+    provider = SplitProvider([rec("app", "10.10.4.30")],
+                             split_ttl_keys={(Z, "app", "A")})
+    result = plan_edge(EDGE, [rec("app", "10.10.4.99")], provider, truth_complete=True)
+    assert len(result.diff.to_update) == 1
+
+
+def test_a_split_key_outside_the_managed_set_is_ignored():
+    provider = SplitProvider([rec("app", "10.10.4.30")],
+                             split_ttl_keys={(Z, "someone-else", "A")})
+    result = plan_edge(EDGE, [rec("app", "10.10.4.30")], provider, truth_complete=True)
+    assert result.diff.is_converged
+    assert result.split_ttl_keys == ()
+
+
+# --- on_mutate: the CLI's evidence that a write was actually attempted ------
+
+def test_on_mutate_fires_only_once_a_write_is_about_to_happen():
+    seen: list[str] = []
+    provider = FakeProvider([])
+    apply_edge(EDGE, [rec("app", "10.10.4.30")], provider, truth_complete=True,
+               on_mutate=seen.append)
+    assert seen == [EDGE.name]
+
+
+def test_on_mutate_does_not_fire_for_a_converged_edge():
+    seen: list[str] = []
+    live = rec("app", "10.10.4.30")
+    apply_edge(EDGE, [live], FakeProvider([live]), truth_complete=True,
+               on_mutate=seen.append)
+    assert seen == []
+
+
+@pytest.mark.parametrize("truth, provider_kwargs, error", [
+    ([], {}, EmptyTruthError),
+    ([rec("app", "10.10.4.30")], {"blocked_keys": {(Z, "app", "A")}}, UnwritableKeyError),
+])
+def test_on_mutate_does_not_fire_for_a_plan_time_refusal(truth, provider_kwargs, error):
+    """These raise before provider.apply() is reachable, so the CLI must not
+    tell the operator to go looking for a half-mutated edge."""
+    seen: list[str] = []
+    provider = BlockingProvider([rec("app", "10.10.4.30")], **provider_kwargs)
+    with pytest.raises(error):
+        apply_edge(EDGE, truth, provider, truth_complete=True, on_mutate=seen.append)
+    assert seen == []

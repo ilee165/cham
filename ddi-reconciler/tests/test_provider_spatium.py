@@ -1,0 +1,459 @@
+"""Spatium adapter — HTTP mocked with responses; no live stack, no credentials.
+
+Every fixture below mirrors a payload captured from a running SpatiumDDI
+instance: groups and zones answer with a bare JSON list, records answer with an
+{items, total, page, page_size} envelope, zone names carry a trailing dot,
+record names are already zone-relative and the type lives under `record_type`.
+Keeping the fixtures shaped like the real API is the point — the previous
+suite passed green against an endpoint layout that did not exist.
+"""
+import pytest
+import responses
+
+from ddi_reconciler.providers.spatium import SpatiumProvider
+
+BASE = "http://spatium.test"
+# Opaque ids: the live API issues uuids, and nothing in the adapter may depend
+# on their shape.
+GID = "fbb26dd5-520b-48df-9cca-90d623623a0a"
+ZID = "a0f0ee20-815d-42a6-a105-ae3bc4092c36"
+OTHER_ZID = "9580e487-a02b-45bf-8159-2c2b7568ee5e"
+
+GROUPS = f"{BASE}/api/v1/dns/groups"
+ZONES = f"{BASE}/api/v1/dns/groups/{GID}/zones"
+RECORDS = f"{BASE}/api/v1/dns/groups/{GID}/zones/{ZID}/records"
+OTHER_RECORDS = f"{BASE}/api/v1/dns/groups/{GID}/zones/{OTHER_ZID}/records"
+
+
+def group(gid=GID, name="primary"):
+    return {"id": gid, "name": name, "group_type": "internal", "default_view": None}
+
+
+def zone(zid=ZID, name="test.zone."):
+    """A zone as the live API returns it: trailing dot, plus SOA noise."""
+    return {"id": zid, "name": name, "zone_type": "primary", "kind": "forward",
+            "group_id": GID, "refresh": 3600, "retry": 900, "ttl": 3600}
+
+
+def rec(name, value="10.0.0.1", rtype="A", ttl=300, zone_name="test.zone."):
+    """A record as the live API returns it: zone-relative `name`, `record_type`."""
+    return {"name": name, "record_type": rtype, "value": value, "ttl": ttl,
+            "fqdn": f"{name}.{zone_name}", "id": f"rec-{name}-{rtype}",
+            "zone_id": ZID, "auto_generated": False, "view_id": None}
+
+
+def page(items, total=None, **extra):
+    """The records envelope. `total` defaults to a self-consistent count."""
+    body = {"items": items, "total": len(items) if total is None else total,
+            "page": 1, "page_size": 100}
+    body.update(extra)
+    return body
+
+
+def one_group_one_zone(zone_name="test.zone."):
+    responses.get(GROUPS, json=[group()])
+    responses.get(ZONES, json=[zone(name=zone_name)])
+
+
+def urls_called():
+    return [call.request.url.split("?")[0] for call in responses.calls]
+
+
+# --- the three-level walk ---------------------------------------------------
+
+@responses.activate
+def test_fetch_desired_walks_groups_then_zones_then_records():
+    responses.get(GROUPS, json=[group()])
+    responses.get(ZONES, json=[zone(name="azure.dwsolution.co.")])
+    responses.get(RECORDS, json=page([
+        rec("app", "10.10.4.30", zone_name="azure.dwsolution.co."),
+        rec("api", "10.10.4.11", zone_name="azure.dwsolution.co."),
+        rec("api", "10.10.4.10", rtype="a", zone_name="azure.dwsolution.co."),
+        rec("azure.dwsolution.co.", "zone-marker", rtype="TXT", ttl=600),
+        rec("srv", "0 0 0 x", rtype="SRV", zone_name="azure.dwsolution.co."),
+    ]))
+    records = SpatiumProvider(BASE, token="t").fetch_desired({"azure.dwsolution.co"})
+    by_key = {r.key: r for r in records}
+    assert by_key[("azure.dwsolution.co", "app", "A")].values == ("10.10.4.30",)
+    # multi-value RRset grouped, and a lowercased type is the same type
+    assert by_key[("azure.dwsolution.co", "api", "A")].values == ("10.10.4.10", "10.10.4.11")
+    # an FQDN-shaped name still resolves to the apex
+    assert by_key[("azure.dwsolution.co", "@", "TXT")].ttl == 600
+    assert len(records) == 3  # SRV is not a supported type
+
+
+@responses.activate
+def test_records_are_never_fetched_for_an_unwanted_zone():
+    """Efficiency property with teeth: a zone nobody asked for costs a round
+    trip and can contribute nothing, so it must not be walked into."""
+    responses.get(GROUPS, json=[group()])
+    responses.get(ZONES, json=[zone(name="test.zone."),
+                               zone(zid=OTHER_ZID, name="not-wanted.zone.")])
+    responses.get(RECORDS, json=page([rec("a")]))
+    responses.get(OTHER_RECORDS, json=page([rec("poison", "10.9.9.9")]))
+    records = SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+    assert [r.name for r in records] == ["a"]
+    assert OTHER_RECORDS not in urls_called()
+
+
+@responses.activate
+def test_zones_are_enumerated_under_every_group():
+    """The wanted zone can live in any group, so all groups get listed."""
+    other_gid = "11111111-2222-3333-4444-555555555555"
+    responses.get(GROUPS, json=[group(gid=other_gid, name="secondary"), group()])
+    responses.get(f"{BASE}/api/v1/dns/groups/{other_gid}/zones", json=[])
+    responses.get(ZONES, json=[zone()])
+    responses.get(RECORDS, json=page([rec("a")]))
+    records = SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+    assert [r.name for r in records] == ["a"]
+
+
+@responses.activate
+def test_zone_relative_and_apex_names_both_normalize():
+    one_group_one_zone()
+    responses.get(RECORDS, json=page([
+        rec("app"),                                    # already zone-relative
+        rec("test.zone.", rtype="TXT", value="apex"),  # fqdn == the zone
+        rec("deep.sub", "10.0.0.2"),                   # multi-label relative
+    ]))
+    records = SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+    assert {r.name for r in records} == {"app", "@", "deep.sub"}
+
+
+@responses.activate
+def test_txt_value_is_passed_through_untouched():
+    """Whether truth should carry presentation-form quotes is not the adapter's
+    call: whatever the API stores is what reaches the diff."""
+    one_group_one_zone()
+    responses.get(RECORDS, json=page([
+        rec("reconciler-check", 'managed-by=ddi-reconciler', rtype="TXT"),
+        rec("quoted", '"managed-by=ddi-reconciler"', rtype="TXT"),
+    ]))
+    records = SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+    values = {r.name: r.values for r in records}
+    assert values["reconciler-check"] == ("managed-by=ddi-reconciler",)
+    assert values["quoted"] == ('"managed-by=ddi-reconciler"',)
+
+
+@responses.activate
+def test_preserves_explicit_ttl_zero():
+    one_group_one_zone()
+    responses.get(RECORDS, json=page([rec("zero", ttl=0)]))
+    records = SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+    assert len(records) == 1
+    assert records[0].ttl == 0  # Must preserve explicit 0, not default to 300
+
+
+# --- auth -------------------------------------------------------------------
+
+@responses.activate
+def test_auth_header_sent_when_token_present():
+    responses.get(GROUPS, json=[])
+    SpatiumProvider(BASE, token="sekrit").fetch_desired({"test.zone"})
+    assert responses.calls[0].request.headers["Authorization"] == "Bearer sekrit"
+
+
+@responses.activate
+def test_no_auth_header_when_no_token():
+    responses.get(GROUPS, json=[])
+    SpatiumProvider(BASE, token="").fetch_desired({"test.zone"})
+    assert "Authorization" not in responses.calls[0].request.headers
+
+
+@responses.activate
+def test_api_failure_is_runtime_error():
+    responses.get(GROUPS, status=500)
+    with pytest.raises(RuntimeError, match="spatium API error"):
+        SpatiumProvider(BASE, token="").fetch_desired({"test.zone"})
+
+
+@responses.activate
+def test_auth_failure_is_runtime_error_not_a_traceback():
+    responses.get(GROUPS, json={"detail": "Not authenticated"}, status=401)
+    with pytest.raises(RuntimeError, match="spatium API error"):
+        SpatiumProvider(BASE, token="").fetch_desired({"test.zone"})
+
+
+# --- pagination: read every page, then prove the read was whole -------------
+
+@responses.activate
+def test_single_page_envelope_is_read_and_reconciled():
+    one_group_one_zone()
+    responses.get(RECORDS, json=page([rec("a")], total=1))
+    records = SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+    assert [r.name for r in records] == ["a"]
+
+
+@responses.activate
+def test_multi_page_record_set_is_consumed_fully():
+    """The live envelope carries no `pages` count and no next link — the
+    declared total is the only thing that says page 2 exists."""
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a", "10.0.0.1")],
+                                 "total": 3, "page": 1, "page_size": 1})
+    responses.get(RECORDS, json={"items": [rec("b", "10.0.0.2")],
+                                 "total": 3, "page": 2, "page_size": 1})
+    responses.get(RECORDS, json={"items": [rec("c", "10.0.0.3")],
+                                 "total": 3, "page": 3, "page_size": 1})
+    provider = SpatiumProvider(BASE, token="t")
+    records = provider.fetch_desired({"test.zone"})
+    assert {r.name for r in records} == {"a", "b", "c"}  # pages 2-3 are not delete orders
+    last = responses.calls[-1].request.url
+    assert "page=3" in last and "page_size=1" in last  # the size the API named
+    assert provider.read_verified is True
+
+
+@responses.activate
+def test_short_read_against_a_declared_total_is_fatal():
+    """The whole point: the envelope says 5, the pages run dry at 1, and
+    'absent from truth' downstream means to_delete. Fail closed instead."""
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a")], "total": 5,
+                                 "page": 1, "page_size": 1})
+    responses.get(RECORDS, json={"items": [], "total": 5, "page": 2, "page_size": 1})
+    with pytest.raises(RuntimeError, match="spatium API error.*declares 5"):
+        SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+
+
+@responses.activate
+def test_follows_an_explicit_next_link():
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a", "10.0.0.1")], "total": 2,
+                                 "next": f"/api/v1/dns/groups/{GID}/zones/{ZID}"
+                                         "/records?page=2"})
+    responses.get(RECORDS, json={"items": [rec("b", "10.0.0.2")], "total": 2, "next": None})
+    records = SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+    assert {r.name for r in records} == {"a", "b"}
+    assert "page=2" in responses.calls[-1].request.url
+
+
+@responses.activate
+def test_follows_a_page_numbered_envelope():
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a", "10.0.0.1")],
+                                 "page": 1, "pages": 2, "size": 1, "total": 2})
+    responses.get(RECORDS, json={"items": [rec("b", "10.0.0.2")],
+                                 "page": 2, "pages": 2, "size": 1, "total": 2})
+    records = SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+    assert {r.name for r in records} == {"a", "b"}
+    assert "page=2" in responses.calls[-1].request.url
+
+
+@responses.activate
+def test_follows_an_offset_limit_envelope():
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a", "10.0.0.1")],
+                                 "total": 2, "limit": 1, "offset": 0})
+    responses.get(RECORDS, json={"items": [rec("b", "10.0.0.2")],
+                                 "total": 2, "limit": 1, "offset": 1})
+    records = SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+    assert {r.name for r in records} == {"a", "b"}
+    assert "offset=1" in responses.calls[-1].request.url
+
+
+@responses.activate
+def test_unrecognized_envelope_is_fatal_not_an_empty_page():
+    responses.get(GROUPS, json=[group()])
+    responses.get(ZONES, json={"payload": [zone()]})
+    with pytest.raises(RuntimeError, match="unrecognized response envelope"):
+        SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+
+
+@responses.activate
+def test_collection_key_holding_a_non_list_is_fatal():
+    responses.get(GROUPS, json={"items": {"id": GID}})
+    with pytest.raises(RuntimeError, match="spatium API error"):
+        SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+
+
+@responses.activate
+def test_next_link_off_the_configured_host_is_refused():
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a")], "total": 2,
+                                 "next": "http://evil.test/api/v1/dns/records"})
+    with pytest.raises(RuntimeError, match="leaves the configured base_url"):
+        SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+    assert len(responses.calls) == 3   # groups, zones, records — never evil.test
+
+
+@responses.activate
+def test_pagination_that_does_not_advance_is_fatal():
+    """An envelope this adapter walks the wrong way must not silently loop or
+    silently duplicate — it must stop the run."""
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a")], "total": 4,
+                                 "limit": 1, "offset": 0})
+    with pytest.raises(RuntimeError, match="did not advance"):
+        SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+
+
+# --- CR-1: what "the read was complete" is allowed to mean ------------------
+
+@responses.activate
+def test_bare_lists_plus_a_reconciled_envelope_is_a_verified_read():
+    """The live shape end to end. Bare lists for groups and zones are the whole
+    collection, and the records envelope reconciles against its own total, so
+    nothing about this read is unaccounted for."""
+    one_group_one_zone()
+    responses.get(RECORDS, json=page([rec("a"), rec("b", "10.0.0.2")], total=2))
+    provider = SpatiumProvider(BASE, token="t")
+    assert len(provider.fetch_desired({"test.zone"})) == 2
+    assert provider.read_verified is True
+
+
+@responses.activate
+def test_a_bare_list_does_not_poison_the_verdict():
+    """A bare list has no declared total to fall short of and no page to skip,
+    so it cannot have been silently truncated — it counts as complete. Were it
+    unprovable, read_verified would be permanently False against this API and
+    no deletion would ever be possible."""
+    responses.get(GROUPS, json=[group()])
+    responses.get(ZONES, json=[zone()])
+    responses.get(RECORDS, json=page([rec("a")], total=1))
+    provider = SpatiumProvider(BASE, token="t")
+    provider.fetch_desired({"test.zone"})
+    assert provider.read_verified is True
+
+
+@responses.activate
+def test_an_envelope_with_no_total_leaves_the_read_unproven():
+    """An envelope IS a window onto a collection, so with no declared total
+    nothing distinguishes 'that was everything' from 'page 2 was dropped'."""
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a")]})
+    provider = SpatiumProvider(BASE, token="t")
+    assert [r.name for r in provider.fetch_desired({"test.zone"})] == ["a"]
+    assert provider.read_verified is False
+
+
+@responses.activate
+def test_an_unproven_zone_listing_taints_the_whole_read():
+    """A zone that never arrives drops every record in it, so the records
+    endpoint declaring its own total is not enough."""
+    responses.get(GROUPS, json=[group()])
+    responses.get(ZONES, json={"items": [zone()]})   # envelope, no total
+    responses.get(RECORDS, json=page([rec("a")], total=1))
+    provider = SpatiumProvider(BASE, token="t")
+    provider.fetch_desired({"test.zone"})
+    assert provider.read_verified is False
+
+
+@responses.activate
+def test_an_unproven_group_listing_taints_the_whole_read():
+    """Same argument one level up: a group that never arrives drops every zone
+    underneath it."""
+    responses.get(GROUPS, json={"items": [group()]})  # envelope, no total
+    responses.get(ZONES, json=[zone()])
+    responses.get(RECORDS, json=page([rec("a")], total=1))
+    provider = SpatiumProvider(BASE, token="t")
+    provider.fetch_desired({"test.zone"})
+    assert provider.read_verified is False
+
+
+@responses.activate
+def test_one_unproven_page_among_verified_ones_taints_the_read():
+    responses.get(GROUPS, json=[group()])
+    responses.get(ZONES, json=[zone(), zone(zid=OTHER_ZID, name="other.zone.")])
+    responses.get(RECORDS, json=page([rec("a")], total=1))
+    responses.get(OTHER_RECORDS, json={"items": [rec("b", "10.0.0.2")]})  # no total
+    provider = SpatiumProvider(BASE, token="t")
+    provider.fetch_desired({"test.zone", "other.zone"})
+    assert provider.read_verified is False
+
+
+def test_an_unread_provider_has_proven_nothing():
+    assert SpatiumProvider(BASE, token="t").read_verified is False
+
+
+# --- malformed payloads land on the exit contract, not on a traceback ------
+
+@responses.activate
+@pytest.mark.parametrize("groups_json", [
+    [{"name": "primary"}],   # group entry without an id
+    ["primary"],             # not an object at all
+    [{"id": "  "}],          # an id that cannot address anything
+])
+def test_malformed_group_payload_is_spatium_api_error(groups_json):
+    responses.get(GROUPS, json=groups_json)
+    responses.get(ZONES, json=[zone()])
+    responses.get(RECORDS, json=page([]))
+    with pytest.raises(RuntimeError, match="spatium API error"):
+        SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+
+
+@responses.activate
+@pytest.mark.parametrize("zones_json", [
+    [{"id": ZID}],                # zone entry without a name
+    [{"name": "test.zone."}],     # zone entry without an id
+    ["test.zone."],               # not an object at all
+])
+def test_malformed_zone_payload_is_spatium_api_error(zones_json):
+    responses.get(GROUPS, json=[group()])
+    responses.get(ZONES, json=zones_json)
+    responses.get(RECORDS, json=page([]))
+    with pytest.raises(RuntimeError, match="spatium API error"):
+        SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+
+
+@responses.activate
+@pytest.mark.parametrize("record_json", [
+    {"name": "a", "value": "10.0.0.1", "ttl": 300},                 # no record_type
+    {"name": "a", "type": "A", "value": "10.0.0.1", "ttl": 300},    # the OLD field name
+    {"record_type": "A", "value": "10.0.0.1", "ttl": 300},          # no name
+    {"name": "a", "record_type": "A", "ttl": 300},                  # no value
+    {"name": "a", "record_type": "A", "value": "10.0.0.1", "ttl": "soon"},
+    "a.test.zone. A 10.0.0.1",                                      # not an object
+])
+def test_malformed_record_payload_is_spatium_api_error(record_json):
+    """Regression: these were bare KeyErrors, which escape the CLI's handled
+    tuple entirely and print a traceback instead of exiting 1. The `type`
+    variant is the shape the adapter used to guess at — it must now be loud,
+    not silently typeless."""
+    one_group_one_zone()
+    responses.get(RECORDS, json=page([record_json], total=1))
+    with pytest.raises(RuntimeError, match="spatium API error"):
+        SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+
+
+@responses.activate
+def test_an_empty_record_name_is_fatal_not_guessed_as_the_apex():
+    """"" could mean the apex or a bug, and inventing a desired record at the
+    apex is how a phantom ADD reaches a live zone. Fail loudly instead."""
+    one_group_one_zone()
+    responses.get(RECORDS, json=page([rec("", "10.0.0.1")], total=1))
+    with pytest.raises(RuntimeError, match="spatium API error"):
+        SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+
+
+@responses.activate
+def test_unreadable_truth_record_is_named_and_fatal():
+    """Truth side, unlike the edge side, must not skip: a desired record that
+    never arrives is a delete order for that key."""
+    one_group_one_zone()
+    responses.get(RECORDS, json=page([rec("broken", value="   ")], total=1))
+    with pytest.raises(RuntimeError, match="spatium API error") as exc:
+        SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+    assert "test.zone/broken/A" in str(exc.value)
+
+
+# --- IN-2: plaintext bearer token ------------------------------------------
+
+def test_plaintext_non_loopback_base_url_warns(capsys):
+    SpatiumProvider("http://spatium.internal:8000", token="sekrit")
+    assert "plaintext" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("base_url", [
+    "http://localhost:8000",     # the documented lab setup must stay quiet
+    "http://127.0.0.1:8000",
+    "http://[::1]:8000",
+    "https://spatium.example",
+])
+def test_loopback_or_tls_base_url_does_not_warn(base_url, capsys):
+    SpatiumProvider(base_url, token="sekrit")
+    assert capsys.readouterr().err == ""
+
+
+def test_no_token_means_nothing_to_leak(capsys):
+    SpatiumProvider("http://spatium.internal:8000", token="")
+    assert capsys.readouterr().err == ""

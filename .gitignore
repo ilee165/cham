@@ -8,8 +8,8 @@ tfplan
 crash.log
 
 # Secrets & local config — NEVER commit
-terraform.tfvars
-*.auto.tfvars
+*.tfvars
+!*.tfvars.example
 .env
 *.pem
 *.key
@@ -29,3 +29,10 @@ dist/
 
 # graphify knowledge-graph output (local tooling artifact)
 graphify-out/
+
+# SDD scratch workspaces
+.superpowers/
+
+# Local, uncommitted credentials for operator runs (never commit)
+.env.local
+*.env.local
