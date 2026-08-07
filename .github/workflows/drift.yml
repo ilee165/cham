@@ -32,10 +32,11 @@ jobs:
           # trust in Entra is what actually grants access.
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           # --dry-run only ever issues GETs (GET /zones, GET /dns_records), so
-          # a Zone:Read + DNS:Read token is sufficient here. Scoping this
-          # unattended job to a read-only token means it cannot mutate DNS even
-          # if something goes wrong in it; keep DNS:Edit for the lab environment.
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # the read-only token is sufficient. This job runs unattended on a
+          # schedule: giving it a token that physically cannot mutate DNS means
+          # a bug here can misreport, but never destroy. DNS:Edit stays in the
+          # lab environment, behind that gate, for jobs a human triggered.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_RO }}
         run: |
           pip install -q uv
 
