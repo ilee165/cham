@@ -36,3 +36,10 @@ graphify-out/
 # Local, uncommitted credentials for operator runs (never commit)
 .env.local
 *.env.local
+
+# SpatiumDDI working clone — the DDI control plane this lab reconciles against.
+# It is a separate upstream project, kept here only so the reconciler can be
+# developed against a running instance. Ignored rather than vendored: committing
+# it would pull another repository's whole history into this one, and a stray
+# `git add -A` is otherwise all it takes.
+spatiumddi/

@@ -1629,11 +1629,15 @@ Both are expected — the unset fails one build and the re-set triggers a good
 one, the same `errored` → `built` pair already visible from 2026-08-06. The
 site kept serving 200 throughout; there was no outage.
 
-`https_enforced` is still `false` — it can only be enabled after the
-certificate exists, which is now true, so it is available whenever wanted.
-Leaving it off does not affect C3: that demo's internal half uses
-`curl --resolve www.dwsolution.co:80:10.10.0.10`, which is answered by BIND9,
-not by Pages.
+`https_enforced` was then turned on (it can only be set once a certificate
+exists): `http://www.dwsolution.co` now answers `301` to
+`https://www.dwsolution.co/`, and the HTTPS URL still returns 200.
+
+That redirect does not disturb C3. Its internal half is
+`curl --resolve www.dwsolution.co:80:10.10.0.10 http://www.dwsolution.co`,
+which pins the connection to the hub VM — the page is served by the internal
+web root behind BIND9's override zone, so it never reaches Pages and never
+sees the redirect. The public half of that demo already used `https://`.
 
 - [x] **Step 3: Verify the state split** — done 2026-08-07
 
