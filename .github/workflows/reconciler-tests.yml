@@ -1,0 +1,72 @@
+name: reconciler-tests
+
+# The reconciler's defining property is that its whole suite runs offline with
+# zero credentials — that is what makes a tool which mutates production DNS
+# safe to iterate on. Until this workflow existed, nothing enforced it: the
+# guarantee held only as long as somebody remembered to check locally.
+#
+# So this job deliberately grants nothing. No secrets, no id-token, no cloud
+# login. If a test ever starts needing a credential or a network call, it fails
+# here rather than silently becoming untestable in CI.
+on:
+  pull_request:
+    paths:
+      - "ddi-reconciler/**"
+      - ".github/workflows/reconciler-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "ddi-reconciler/**"
+      - ".github/workflows/reconciler-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ddi-reconciler
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --frozen
+
+      - name: Test suite (no credentials in the environment)
+        # The env block below pins each credential to empty for this step, so a
+        # test that quietly depends on one fails here instead of passing on a
+        # developer's machine where it happens to be exported.
+        env:
+          SPATIUM_API_TOKEN: ""
+          CLOUDFLARE_API_TOKEN: ""
+          AZURE_SUBSCRIPTION_ID: ""
+          AZURE_CLIENT_ID: ""
+          AZURE_TENANT_ID: ""
+        run: uv run pytest -q
+
+      - name: Committed snapshot is valid and matches truth's shape
+        # desired-records.json is the artifact nightly drift acts on, including
+        # deciding whether deletions are permitted. A corrupt or hand-edited one
+        # would surface at 06:00 UTC against live DNS; catch it at review time.
+        run: |
+          uv run python - <<'PY'
+          from pathlib import Path
+          from ddi_reconciler.config import load_config
+          from ddi_reconciler.desired_file import load_desired
+
+          records, verified = load_desired(Path("desired-records.json"))
+          managed = {k for edge in load_config(Path("config.toml")).edges
+                       for k in edge.managed_keys}
+          keys = {r.key for r in records}
+
+          print(f"{len(records)} records, truth_verified={verified}")
+          unowned = keys - managed
+          if unowned:
+              raise SystemExit(f"snapshot carries records outside managed_keys: {sorted(unowned)}")
+          print("every snapshot record is inside the ADR-005 allowlist")
+          PY
