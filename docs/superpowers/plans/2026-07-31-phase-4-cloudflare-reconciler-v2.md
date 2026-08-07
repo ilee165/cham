@@ -1586,7 +1586,7 @@ that true, and both were verified against the live zone after this apply:
   records and reported `2 add, 0 update, 0 delete`. Zero deletes is the
   allowlist proving itself on real infrastructure rather than on a fixture.
 
-- [x] **Step 2: Verify from the outside world** — DNS verified; HTTPS pending cert
+- [x] **Step 2: Verify from the outside world** — done 2026-08-07
 
 ```bash
 dig +short www.dwsolution.co @1.1.1.1
@@ -1597,19 +1597,43 @@ Expected: CNAME chain to the Pages host resolving to real IPs; `"resolved-via=cl
 
 `www.dwsolution.co` → `ilee165.github.io` → `185.199.108-111.153` (+ AAAA), and
 `external-check.dwsolution.co` returns `"resolved-via=cloudflare-public"`, both
-from `1.1.1.1`. The page serves the expected `<h1>PUBLIC — resolved via
-Cloudflare</h1>` over **HTTP**.
+from `1.1.1.1`. `https://www.dwsolution.co` returns 200 with the expected
+`<h1>PUBLIC — resolved via Cloudflare</h1>` under full chain validation,
+served with a Let's Encrypt certificate `CN=www.dwsolution.co`
+(SAN `www.dwsolution.co`, valid 2026-08-07 → 2026-11-05).
 
-**HTTPS is not yet available**, and the reason is ordering rather than
-misconfiguration: `repos/ilee165/www-dwsolution/pages` already had
-`cname: www.dwsolution.co` set on 2026-08-06, a day before this apply created
-the DNS record. GitHub requests a Let's Encrypt certificate only once the
-custom domain resolves, so that first attempt had nothing to validate and
-`https_certificate` is still `NONE`; the TLS handshake falls back to the
-`*.github.io` wildcard, whose SANs do not cover this domain. Now that the
-CNAME resolves, GitHub re-provisions on its own. If it has not within ~24h,
-remove and re-add the custom domain in repo settings to force revalidation.
-`https_enforced` can only be turned on after the certificate exists.
+**The certificate needed a manual nudge, and this is the part to remember.**
+`repos/ilee165/www-dwsolution/pages` had `cname: www.dwsolution.co` set on
+2026-08-06, a day before this apply created the DNS record. GitHub requests a
+Let's Encrypt certificate only once the custom domain resolves, so that first
+attempt had nothing to validate and left `https_certificate: NONE` — the
+handshake fell back to the `*.github.io` wildcard, whose SANs do not cover
+this domain. **GitHub did not retry on its own.** It sat at `NONE` for 30+
+minutes after the CNAME went live, and re-`PUT`ting the same `cname` value
+did nothing for another 12. Only unsetting `cname` to `null` and immediately
+re-setting it forced revalidation, after which the certificate reached
+`state: approved` within a minute.
+
+Everything on the DNS side was ruled out before touching the repo, and the
+checks are worth repeating if this recurs: no CAA record on the zone (the
+Cloudflare record listing shows none, so nothing forbids Let's Encrypt from
+issuing); no A record shadowing the CNAME; `proxied = false`, so Cloudflare
+is DNS-only for this name and no zone-level "Always Use HTTPS" can intercept
+the challenge; and `http://www.dwsolution.co/.well-known/acme-challenge/`
+returns a plain 404 from GitHub rather than a 301, proving HTTP-01 validation
+can reach it.
+
+Two harmless-looking things happen during the remove/re-add: the Pages
+`status` briefly reads `errored`, and a failed build appears in the history.
+Both are expected — the unset fails one build and the re-set triggers a good
+one, the same `errored` → `built` pair already visible from 2026-08-06. The
+site kept serving 200 throughout; there was no outage.
+
+`https_enforced` is still `false` — it can only be enabled after the
+certificate exists, which is now true, so it is available whenever wanted.
+Leaving it off does not affect C3: that demo's internal half uses
+`curl --resolve www.dwsolution.co:80:10.10.0.10`, which is answered by BIND9,
+not by Pages.
 
 - [x] **Step 3: Verify the state split** — done 2026-08-07
 
