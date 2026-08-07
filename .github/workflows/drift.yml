@@ -4,8 +4,18 @@ on:
     - cron: "0 6 * * *"   # 06:00 UTC nightly
   workflow_dispatch:
 
+# This job deliberately checks only the PUBLIC edge, which is why it needs no
+# Azure credentials and no id-token permission. The azure-private edge lives in
+# rg-cham-lab, which is destroyed between sessions for cost control, so
+# including it would make a scheduled run fail every night on a resource group
+# that is absent by design — and a nightly job that is always red tells you
+# nothing. That edge is checked by hand during a live session instead.
+#
+# To check both edges (only meaningful while the lab is up): drop the --edge
+# flag below, restore an azure/login@v2 step with client-id/tenant-id/
+# subscription-id, add `id-token: write` here, and export AZURE_SUBSCRIPTION_ID
+# to the step — the CLI reads it explicitly and azure/login does not set it.
 permissions:
-  id-token: write
   contents: read
   issues: write
 
@@ -17,20 +27,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Run reconciler dry-run
         id: reconcile
         working-directory: ddi-reconciler
         env:
-          # azure/login authenticates the az CLI (which DefaultAzureCredential
-          # then picks up) but does not export this, and the CLI requires it
-          # explicitly. It is an identifier, not a credential — the federated
-          # trust in Entra is what actually grants access.
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           # --dry-run only ever issues GETs (GET /zones, GET /dns_records), so
           # the read-only token is sufficient. This job runs unattended on a
           # schedule: giving it a token that physically cannot mutate DNS means
@@ -48,7 +48,8 @@ jobs:
           # command, and read PIPESTATUS[0] rather than $? so tee's own
           # always-zero exit can never mask cham-reconcile's real one.
           set +e
-          uv run cham-reconcile --dry-run --desired-from-file desired-records.json \
+          uv run cham-reconcile --dry-run --edge cloudflare-public \
+            --desired-from-file desired-records.json \
             | tee "$GITHUB_WORKSPACE/drift.txt"
           exit_code="${PIPESTATUS[0]}"
           set -e
