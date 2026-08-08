@@ -1,0 +1,24 @@
+# Compose override — bind the bundled BIND9 agent to the lab's DNS group.
+#
+# Upstream's docker-compose.yml hardcodes `AGENT_GROUP: default` on the
+# dns-bind9 service. On first start the agent auto-creates a group literally
+# named "default" (catalog zone `catalog.spatium.invalid.`) and registers
+# itself there. Every zone this lab cares about lives in the `primary` group,
+# so the result is a server with no zones and a group with no server: BIND9
+# answers SERVFAIL for everything while the control plane looks healthy.
+#
+# Nothing here is lab-specific beyond the group name — the value must match
+# the group's `name` field in the control plane, not its UUID.
+#
+# Usage, from the spatiumddi clone root:
+#   docker compose -f docker-compose.yml -f ../spatium/docker-compose.agent-group.yml \
+#     --profile dns-bind9 up -d dns-bind9
+#
+# The agent caches its assigned server_id in the dns_bind9_state volume. When
+# moving an already-registered agent between groups, delete the old server
+# registration and drop that volume first, or it re-attaches to the old group.
+
+services:
+  dns-bind9:
+    environment:
+      AGENT_GROUP: ${DNS_AGENT_GROUP:-primary}
