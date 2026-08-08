@@ -38,8 +38,16 @@ graphify-out/
 *.env.local
 
 # SpatiumDDI working clone — the DDI control plane this lab reconciles against.
-# It is a separate upstream project, kept here only so the reconciler can be
-# developed against a running instance. Ignored rather than vendored: committing
-# it would pull another repository's whole history into this one, and a stray
-# `git add -A` is otherwise all it takes.
-spatiumddi/
+# A separate upstream project, kept here only so the reconciler can be developed
+# against a running instance.
+#
+# Anchored with a leading slash: this rule is meant for the clone at the repo
+# root and nothing else. Unanchored, it would also swallow any future
+# ddi-reconciler/src/ddi_reconciler/spatiumddi/ package directory, which would
+# be silently untracked — the worst kind of ignore bug.
+#
+# It carries its own .git, so `git add -A` would record a gitlink (an unusable
+# half-submodule with no .gitmodules entry), not the clone's contents. The
+# reason to ignore it is what sits inside the working tree: local config and
+# .env files for the running instance, which have no business here.
+/spatiumddi/

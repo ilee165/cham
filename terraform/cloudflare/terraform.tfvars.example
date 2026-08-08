@@ -1,16 +1,50 @@
-# Copy to terraform.tfvars (gitignored) and fill in.
-# Provider credential comes from the CLOUDFLARE_API_TOKEN env var (scoped
-# token, Zone:DNS:Edit only) — never from tfvars.
+# Both variables already have working defaults in variables.tf, so a
+# terraform.tfvars is OPTIONAL here — copy this file to terraform.tfvars
+# (gitignored) only when you need to override one of them.
 #
-# Operator runs keep that token in ./.env.local (gitignored via *.env.local):
+# What you DO need before an apply is credentials, and neither belongs in
+# tfvars:
 #
-#   set -a; . ./.env.local; set +a
+# 1. The Cloudflare API token, read from the CLOUDFLARE_API_TOKEN env var.
+#    It needs TWO permissions, not one:
+#      - Zone / DNS / Edit   — to create and update the records below
+#      - Zone / Zone / Read  — because data.cloudflare_zone.apex resolves the
+#                              zone by name (GET /zones?name=...), which
+#                              DNS:Edit alone does not permit
+#    Cloudflare's "Edit zone DNS" template grants both. A hand-built token
+#    with only DNS:Edit fails at the data source, before it reaches a record.
+#    Scope it to this zone alone. For unattended jobs use a read-only token
+#    instead — see .github/workflows/drift.yml.
+#
+# 2. Azure credentials for the state backend (azurerm, use_azuread_auth), from
+#    `az login` locally or OIDC in CI. The identity needs Storage Blob Data
+#    Contributor on the state account; Contributor alone cannot read state.
+#
+# Operator run, from this directory:
+#
+#   set -a; . ./.env.local; set +a          # holds CLOUDFLARE_API_TOKEN, gitignored
 #   terraform init -backend-config=backend.auto.tfbackend
-#   terraform plan -out=tfplan && terraform apply tfplan
+#   terraform plan -out=tfplan
+#   terraform apply tfplan                  # apply the reviewed plan, not a fresh one
 #
-# The token also needs Zone:Zone:Read — data.cloudflare_zone.apex resolves the
-# zone by name (GET /zones?name=...), which DNS:Edit alone does not permit.
-# Cloudflare's "Edit zone DNS" template includes it; a hand-built token may not.
+# `init` needs -backend-config because main.tf declares a PARTIAL backend: it
+# pins resource_group_name, container_name, and key, but deliberately leaves
+# storage_account_name, subscription_id, and tenant_id out of version control.
+# Those live in backend.auto.tfbackend, which is gitignored (*.tfbackend) and
+# so is not in a fresh clone — create it before the first init:
+#
+#   cat > backend.auto.tfbackend <<'EOF'
+#   storage_account_name = "<your state account>"
+#   subscription_id      = "<subscription guid>"
+#   tenant_id            = "<tenant guid>"
+#   EOF
+#
+# Add -reconfigure to init when switching backends or after a failed init.
+#
+# Plan and apply as two steps against a saved plan file. A bare `apply` re-plans
+# and applies whatever it finds at that moment, which is not necessarily what
+# you reviewed — and this zone carries live production mail.
+
 zone_name = "dwsolution.co"
 # www_public_target has a default (ilee165.github.io); override only if the
 # public www target (e.g. Pages site) changes.

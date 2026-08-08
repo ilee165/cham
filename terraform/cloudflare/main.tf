@@ -1,6 +1,14 @@
 # Public DNS for dwsolution.co — the external half of the split horizon.
 # Separate state from the Azure stack: different provider, different blast
-# radius, different credential (scoped API token, Zone:DNS:Edit only).
+# radius, different credential (scoped API token: Zone:DNS:Edit to write the
+# records, plus Zone:Zone:Read because data.cloudflare_zone.apex below
+# resolves the zone by name).
+#
+# This zone is NOT a lab zone. It carries the Microsoft 365 records that
+# dwsolution.co's mail depends on — MX, SPF, the MS= verification TXT, and the
+# autodiscover/sip/lyncdiscover/Intune CNAMEs. Terraform manages only the two
+# resources declared below and has no zone-level resource, so it cannot remove
+# a record it did not create; keep it that way.
 
 terraform {
   required_version = ">= 1.9"
@@ -41,6 +49,13 @@ resource "cloudflare_record" "www" {
   content = var.www_public_target
   ttl     = 300
   proxied = false # keep dig-able; proxying returns Cloudflare edge IPs
+
+  # Pinned rather than left to the provider default. If a record of this name
+  # already exists — added by hand, or by a Pages setup wizard — fail the
+  # apply instead of overwriting it. In a zone carrying live mail, silently
+  # winning a collision is the wrong outcome; adopting an incumbent is an
+  # explicit `terraform import`, which is a decision, not a side effect.
+  allow_overwrite = false
 }
 
 resource "cloudflare_record" "lab_marker" {
@@ -49,4 +64,6 @@ resource "cloudflare_record" "lab_marker" {
   type    = "TXT"
   content = "resolved-via=cloudflare-public"
   ttl     = 300
+
+  allow_overwrite = false # same reasoning as www above
 }
