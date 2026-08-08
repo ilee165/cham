@@ -1,0 +1,107 @@
+Phase 4 Task C3 Step 1 — split-horizon demo
+Measured 2026-08-08, lab redeployed the same day (36 resources, eastus2).
+hub_public_ip=20.110.104.204  hub_private_ip=10.10.0.10
+
+================================================================
+PUBLIC HALF — resolved via Cloudflare, served by GitHub Pages
+================================================================
+$ dig +short @1.1.1.1 www.dwsolution.co
+ilee165.github.io.
+185.199.108.153
+185.199.109.153
+185.199.110.153
+185.199.111.153
+
+$ GET https://www.dwsolution.co
+HTTP 200
+<h1>PUBLIC — resolved via Cloudflare</h1>
+
+================================================================
+INTERNAL HALF — DNS override, and the page it points at
+================================================================
+Internal DNS answer (SpatiumDDI-managed BIND9, Task A3).
+The agent publishes on host port 1053, not 53:
+
+$ dig +short -p 1053 @127.0.0.1 www.dwsolution.co
+10.10.0.10
+
+Internal page, fetched from the hub itself. nginx is bound to the hub's
+private IP only (never localhost, never the public NIC — cloud-init pins
+`listen 10.10.0.10:80` as defense in depth), so `curl http://localhost/`
+on the hub returns 000 by design:
+
+$ curl -s -o /dev/null -w "%{http_code}" http://10.10.0.10/
+200
+$ curl -s http://10.10.0.10/ | head -1
+<h1>INTERNAL — served from the hub over the tunnel</h1>
+
+Both answers for the same name exist at the same moment — 10.10.0.10
+internally, the GitHub Pages addresses publicly. That is the split horizon.
+
+================================================================
+Azure private DNS, resolved from inside the VNet
+================================================================
+Proves the reconciler's record is live in the private zone and that the
+hub's resolver reaches it:
+
+$ dig +short @10.10.0.10 app.azure.dwsolution.co
+10.10.4.30
+
+================================================================
+NOT DEMONSTRATED — the laptop-over-tunnel path
+================================================================
+The plan's Step 1 runs the demo from the laptop with the WireGuard tunnel
+up and down. That path was not exercised, for two independent reasons.
+Both are pre-existing conditions, not regressions.
+
+1. There is no tunnel to bring up.
+   The hub's cloud-init deliberately leaves WireGuard off until a real
+   private key is installed by a human:
+
+       systemctl disable --now wg-quick@wg0 || true
+       echo "Run 'wg genkey' on this host, patch wg0.conf, then:
+       systemctl enable --now wg-quick@wg0"
+
+   Measured on the hub:
+       $ systemctl is-enabled wg-quick@wg0   -> disabled
+       $ systemctl is-active  wg-quick@wg0   -> inactive
+
+   The laptop side is also absent: no wg.exe on PATH, no WireGuardTunnel
+   service, no WireGuard configuration directory. Standing the tunnel up
+   means generating a hub private key, patching wg0.conf, and installing
+   WireGuard on the laptop — an operator step the design intends a human
+   to perform, not a gap in this task.
+
+2. Even with the tunnel up, the hub would answer `www` publicly.
+   The A3 override zone lives in the SpatiumDDI-managed BIND9 (the agent
+   container on the laptop). The hub runs its own, independent BIND9,
+   configured by cloud-init, which has no such zone:
+
+       $ sudo grep -hE "^zone" /etc/bind/named.conf*
+       zone "." { ... }
+       zone "localhost" { ... }
+       zone "127.in-addr.arpa" { ... }
+       zone "0.in-addr.arpa" { ... }
+       zone "255.in-addr.arpa" { ... }
+       zone "lab.dwsolution.co" { ... }
+
+       $ sudo grep -rl "www.dwsolution.co" /etc/bind/
+       (no matches)
+
+       $ dig +short @10.10.0.10 www.dwsolution.co
+       ilee165.github.io.
+       185.199.108.153
+       185.199.109.153
+       185.199.110.153
+       185.199.111.153
+
+   So a client that reaches the hub over the tunnel and uses 10.10.0.10 as
+   its resolver gets the PUBLIC answer for www. The split horizon holds only
+   for clients querying the SpatiumDDI resolver.
+
+   Closing this is a design decision, not a fix to apply blind. Either
+   register the hub's BIND9 as a server in the SpatiumDDI `primary` group so
+   the control plane renders the override zone onto it (the DDI-managed
+   path, and the more consistent one), or add the override to the hub's
+   cloud-init BIND9 config (simpler, but then two systems own hub DNS).
+   Deferred to Phase 5 rather than decided here.

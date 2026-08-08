@@ -55,5 +55,19 @@ was made. Start with ADR-001.
 - [x] Phase 1 — local SpatiumDDI, zones, DHCP→DNS propagation
 - [x] Phase 2 — Azure core (hub, spokes, peering, NSG, UDR)
 - [x] Phase 3 — WireGuard tunnel + hybrid resolution
-- [ ] Phase 4 — Cloudflare + reconciler v2
+- [x] Phase 4 — Cloudflare + reconciler v2
 - [ ] Phase 5 — CI/CD pipeline
+
+All six of Phase 4's exit criteria hold, with evidence under
+`docs/evidence/phase4/`: the offline suite passes with no credentials and no
+network, the exit-code contract is proven live (1 operational error / 2 drift
+/ 0 converged), first convergence applied the three seeded records and an
+immediate re-run is a no-op, tampering each edge is detected and healed, the
+before/after listings differ by exactly the reconciler's own record, and the
+Cloudflare stack applies from its own state file with only a scoped token.
+
+Two things Phase 4 did **not** settle, both deferred to Phase 5 with the
+reasoning in [docs/decisions.md](docs/decisions.md): the `www` split horizon
+is served by the SpatiumDDI resolver and not by the hub's own BIND9
+(ADR-007), and the laptop-to-hub WireGuard tunnel is still the manual
+key-generation step cloud-init leaves to an operator.

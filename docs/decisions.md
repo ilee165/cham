@@ -57,3 +57,36 @@ interview material as much as documentation.
   knowing the convention. Documented here; enforced by managed zones plus
   an explicit canonical record-key allowlist. Deletion is impossible without
   a key in that allowlist.
+
+## ADR-006: CI drift detection compares edges to a committed desired-state snapshot
+- **Context:** Nightly CI cannot reach the laptop's SpatiumDDI API (home NAT,
+  stack usually down), but edge drift is exactly what CI should catch.
+- **Decision:** Sessions end with `cham-reconcile --export desired-records.json`
+  (committed). Nightly drift runs
+  `cham-reconcile --dry-run --desired-from-file desired-records.json` and keys
+  off the exit code (0 converged / 2 drift / 1 error).
+- **Tradeoff accepted:** The snapshot can lag live truth between sessions, so
+  CI detects "edge vs last-exported truth". Acceptable: truth only changes
+  during sessions, and sessions end with an export.
+
+## ADR-007: The `www` split horizon lives on the SpatiumDDI resolver, not the hub
+- **Context:** Two independent BIND9 instances serve this lab. The hub's is
+  configured by cloud-init and is what a tunnel client reaches at
+  `10.10.0.10`; the SpatiumDDI-managed one runs as an agent container and is
+  what the control plane renders zones onto. Task A3 created the
+  `www.dwsolution.co` single-name override zone on the SpatiumDDI side only,
+  so the hub still answers `www` with the public GitHub Pages addresses.
+- **Decision:** Record the split as it actually stands rather than paper over
+  it. The split horizon is proven and real for clients querying the
+  SpatiumDDI resolver; it does not apply to clients using the hub's resolver.
+  Unifying them is deferred to Phase 5.
+- **Options when it is taken up:** register the hub's BIND9 as a server in the
+  SpatiumDDI `primary` group, so the control plane owns hub DNS and renders
+  the override there (consistent with ADR-005 — one source of truth); or add
+  the override zone to the hub's cloud-init, which is simpler but gives hub
+  DNS two owners and reintroduces exactly the ownership fight ADR-005 exists
+  to prevent. The first is preferred.
+- **Tradeoff accepted:** until then, "the split horizon works" is a claim that
+  needs the resolver named. Evidence in
+  `docs/evidence/phase4/split-horizon.txt` states which resolver was queried
+  for every measurement.
