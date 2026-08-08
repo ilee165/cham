@@ -1627,15 +1627,28 @@ docker run --rm --entrypoint sh \
   -c 'named-checkconf /var/lib/spatium-dns-agent/rendered.new/named.conf'
 ```
 
-**Pre-existing data defect found while verifying (for C2, not fixed here):**
-`demo.dwsolution.co` is stored with value `www.dwsolution.co` — no trailing
-dot — so BIND9 treats it as relative and appends the origin:
+**Pre-existing data defect found while verifying (still open after C2 —
+tracked as issue #9):** `demo.dwsolution.co` is stored with value
+`www.dwsolution.co` — no trailing dot — so SpatiumDDI's own BIND9 renders the
+CNAME as relative and appends the origin:
 ```
 dig +short -p 1053 @127.0.0.1 demo.dwsolution.co CNAME → www.dwsolution.co.dwsolution.co.
 ```
-`demo` is one of the reconciler's `managed_keys`, so this is exactly the kind
-of drift C2 is meant to converge. Left in place deliberately: fixing it now
-would remove the test case. Issue #4 stays open and correct.
+An earlier revision of this paragraph called this "exactly the kind of drift
+C2 is meant to converge" and claimed fixing it would remove a C2 test case.
+Both halves were wrong, and C2 proved it (review finding WR-01,
+`2026-08-08-pr-7-8-REVIEW.md`): the model canonicalizes CNAME targets with
+trailing dots dropped on both the truth and edge sides (`model.py`), so the
+reconciler is structurally blind to the missing dot — after C2 fully
+converged (final dry-run exit 0), the Cloudflare edge answers
+`demo → www.dwsolution.co.` correctly (CNAME content is absolute there)
+while the internal answer above is unchanged. Nor was it ever a C2 test
+case: C2's cases were the two records' absence from the edge and the two
+tamper injections, all dot-independent. The fix is truth-side — PUT the
+Spatium value as `www.dwsolution.co.` (with the dot); canonicalization
+guarantees zero edge churn, and the BIND9 rendering becomes absolute.
+Issue #4 tracked only the edge drift, which C2 did resolve; the truth-value
+defect continues as issue #9 (Phase 5).
 
 ### Task A4: Apply the Cloudflare stack
 
