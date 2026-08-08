@@ -1,0 +1,25 @@
+=== 0. operational-error case: CLOUDFLARE_API_TOKEN unset (expect exit=1) ===
+error: missing required environment variable: CLOUDFLARE_API_TOKEN
+exit=1
+
+=== 1. dry-run (expect 3 ADD, exit=2) ===
+[azure-private] ADD    app A 10.10.4.30 ttl=300
+[cloudflare-public] ADD    demo CNAME www.dwsolution.co ttl=300
+[cloudflare-public] ADD    reconciler-check TXT managed-by=ddi-reconciler ttl=300
+summary: 3 add, 0 update, 0 delete across 2 edge(s)
+exit=2
+
+=== 2. apply (expect exit=0) ===
+[azure-private] ADD    app A 10.10.4.30 ttl=300
+[azure-private] applied 1 change(s)
+[cloudflare-public] ADD    demo CNAME www.dwsolution.co ttl=300
+[cloudflare-public] ADD    reconciler-check TXT managed-by=ddi-reconciler ttl=300
+[cloudflare-public] applied 2 change(s)
+summary: 3 add, 0 update, 0 delete across 2 edge(s) — applied
+exit=0
+
+=== 3. dry-run again (expect converged, exit=0 â€” idempotency) ===
+[azure-private] converged (0 changes)
+[cloudflare-public] converged (0 changes)
+summary: 0 add, 0 update, 0 delete across 2 edge(s)
+exit=0

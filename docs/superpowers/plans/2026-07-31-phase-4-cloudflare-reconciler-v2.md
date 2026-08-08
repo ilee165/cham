@@ -1627,15 +1627,28 @@ docker run --rm --entrypoint sh \
   -c 'named-checkconf /var/lib/spatium-dns-agent/rendered.new/named.conf'
 ```
 
-**Pre-existing data defect found while verifying (for C2, not fixed here):**
-`demo.dwsolution.co` is stored with value `www.dwsolution.co` — no trailing
-dot — so BIND9 treats it as relative and appends the origin:
+**Pre-existing data defect found while verifying (still open after C2 —
+tracked as issue #9):** `demo.dwsolution.co` is stored with value
+`www.dwsolution.co` — no trailing dot — so SpatiumDDI's own BIND9 renders the
+CNAME as relative and appends the origin:
 ```
 dig +short -p 1053 @127.0.0.1 demo.dwsolution.co CNAME → www.dwsolution.co.dwsolution.co.
 ```
-`demo` is one of the reconciler's `managed_keys`, so this is exactly the kind
-of drift C2 is meant to converge. Left in place deliberately: fixing it now
-would remove the test case. Issue #4 stays open and correct.
+An earlier revision of this paragraph called this "exactly the kind of drift
+C2 is meant to converge" and claimed fixing it would remove a C2 test case.
+Both halves were wrong, and C2 proved it (review finding WR-01,
+`2026-08-08-pr-7-8-REVIEW.md`): the model canonicalizes CNAME targets with
+trailing dots dropped on both the truth and edge sides (`model.py`), so the
+reconciler is structurally blind to the missing dot — after C2 fully
+converged (final dry-run exit 0), the Cloudflare edge answers
+`demo → www.dwsolution.co.` correctly (CNAME content is absolute there)
+while the internal answer above is unchanged. Nor was it ever a C2 test
+case: C2's cases were the two records' absence from the edge and the two
+tamper injections, all dot-independent. The fix is truth-side — PUT the
+Spatium value as `www.dwsolution.co.` (with the dot); canonicalization
+guarantees zero edge churn, and the BIND9 rendering becomes absolute.
+Issue #4 tracked only the edge drift, which C2 did resolve; the truth-value
+defect continues as issue #9 (Phase 5).
 
 ### Task A4: Apply the Cloudflare stack
 
@@ -1800,13 +1813,20 @@ reason. The real value lives only in the gitignored `*.tfbackend` file.
 
 *Depends on: all of Track B, A1–A4, Phase 2 applied (Azure zone exists), Phase 1 stack up.*
 
-- [ ] **Step 1:** In the SpatiumDDI control plane create the reconciler-managed truth records (zones are *modeled* — Spatium doesn't serve them publicly; it is the system of record):
+**Done 2026-08-08.** The lab was redeployed first (`terraform apply`, 36 add /
+0 change / 0 destroy — the same 36 torn down on 2026-08-06). Step 1's records
+were already seeded, and Step 2's re-export came back **byte-identical** to
+the snapshot committed at `6359095`, which is the stability the step asks for:
+`exported 3 records to desired-records.json`, `version 1`, `count 3`,
+`truth_verified true`. No new commit was needed.
+
+- [x] **Step 1:** In the SpatiumDDI control plane create the reconciler-managed truth records (zones are *modeled* — Spatium doesn't serve them publicly; it is the system of record):
   - Zone `azure.dwsolution.co` (create if not present): `app A 10.10.4.30`, TTL 300.
   - Zone `dwsolution.co` (create if not present): `demo CNAME www.dwsolution.co`, TTL 300; `reconciler-check TXT "managed-by=ddi-reconciler"`, TTL 300.
 
   These names exactly match `config.toml`'s `managed_keys` — anything else in those zones is invisible to the reconciler.
 
-- [ ] **Step 2:** Export and commit the snapshot (ADR-006, consumed by Phase 5 CI):
+- [x] **Step 2:** Export and commit the snapshot (ADR-006, consumed by Phase 5 CI):
 
 ```bash
 cd ddi-reconciler
@@ -1820,7 +1840,44 @@ Expected: `exported 3 records to desired-records.json`; the file content is sort
 
 *Depends on C1. Run with `az login` active, `CLOUDFLARE_API_TOKEN` and `AZURE_SUBSCRIPTION_ID` exported.*
 
-- [ ] **Step 1: Record the pre-state of protected records** (evidence for the safety claim):
+**Done 2026-08-08.** Evidence in `docs/evidence/phase4/`. Exit-code contract
+proven live end to end: **1** (operational error, token unset) → **2** (drift,
+3 ADDs) → **0** (applied) → **0** (converged, idempotent). Both tampers
+detected and healed — Azure `app` deleted → `1 add` → healed to `10.10.4.30`;
+Cloudflare `demo` repointed to `example.com` → `UPDATE demo CNAME example.com
+-> www.dwsolution.co` → healed → converged. Ownership safety: the
+before/after listings differ by exactly one line (`app`), `db` and both
+auto-registered `vm-test-*` records byte-identical, and across every run the
+reconciler emitted operations for only `app`, `demo`, `reconciler-check` —
+never `www` or `external-check`, and **never a DELETE**.
+
+**A live-only defect had to be fixed first — the first `--apply` failed.**
+`_record_set_body` built the Azure `create_or_update` body as a flat
+snake_case dict (`{"ttl": 300, "a_records": [{"ipv4_address": …}]}`). The
+serializer maps those model attributes to wire paths under `properties`, so
+nothing matched and every field was dropped: the call still succeeded and
+Azure created the record set with `ttl: 0` and no values. The reconciler
+behaved correctly — its post-apply verification re-planned and reported
+`edge 'azure-private' still drifted after apply`, refusing to claim success.
+
+Measured against the live API:
+
+```
+flat snake_case (old code) -> ttl=0   a_records=[]
+wire format (new code)     -> ttl=300 a_records=['10.10.9.2']
+explicit RecordSet model   -> ttl=300 a_records=['10.10.9.3']
+```
+
+The offline suite could not have caught it: the fake client stores whatever
+dict it is handed, so the two `apply()` tests asserted the broken shape
+verbatim and stayed green. Fixed in `providers/azure.py`, and closed off with
+a parametrized test over all five supported record types that constructs the
+SDK's own `RecordSet` from the body and reads the fields back — no
+credentials, no network, and it fails on the old shape with `ttl is None`.
+Suite now **305 passed** with `CLOUDFLARE_API_TOKEN`, `SPATIUM_API_TOKEN`, and
+`AZURE_SUBSCRIPTION_ID` all unset.
+
+- [x] **Step 1: Record the pre-state of protected records** (evidence for the safety claim):
 
 ```bash
 mkdir -p ../docs/evidence/phase4
@@ -1828,7 +1885,7 @@ az network private-dns record-set a list -g rg-cham-lab -z azure.dwsolution.co -
 ```
 Expected: `db` (seed) and the auto-registered `vm-test-*` records present.
 
-- [ ] **Step 2: First convergence**
+- [x] **Step 2: First convergence**
 
 ```bash
 uv run cham-reconcile --dry-run; echo "exit=$?"     # expect diff: 3 ADDs, exit=2
@@ -1837,7 +1894,7 @@ uv run cham-reconcile --dry-run; echo "exit=$?"     # expect converged, exit=0  
 ```
 Capture all three to `../docs/evidence/phase4/first-convergence.txt` with `tee -a`.
 
-- [ ] **Step 3: Verify on the edges directly**
+- [x] **Step 3: Verify on the edges directly**
 
 ```bash
 az network private-dns record-set a show -g rg-cham-lab -z azure.dwsolution.co -n app --query aRecords -o tsv   # 10.10.4.30
@@ -1845,7 +1902,7 @@ dig +short demo.dwsolution.co @1.1.1.1        # CNAME → www → Pages IPs
 dig +short TXT reconciler-check.dwsolution.co @1.1.1.1   # "managed-by=ddi-reconciler"
 ```
 
-- [ ] **Step 4: Tamper-and-heal, Azure edge**
+- [x] **Step 4: Tamper-and-heal, Azure edge**
 
 ```bash
 az network private-dns record-set a delete -g rg-cham-lab -z azure.dwsolution.co -n app --yes
@@ -1853,14 +1910,14 @@ uv run cham-reconcile --dry-run; echo "exit=$?"   # expect ADD app, exit=2
 uv run cham-reconcile --apply                     # heals
 ```
 
-- [ ] **Step 5: Tamper-and-heal, Cloudflare edge** — in the Cloudflare dashboard change `demo`'s target to `example.com`, then:
+- [x] **Step 5: Tamper-and-heal, Cloudflare edge** — in the Cloudflare dashboard change `demo`'s target to `example.com`, then:
 
 ```bash
 uv run cham-reconcile --dry-run; echo "exit=$?"   # expect UPDATE demo ... -> www.dwsolution.co, exit=2
 uv run cham-reconcile --apply && uv run cham-reconcile --dry-run; echo "exit=$?"   # healed, exit=0
 ```
 
-- [ ] **Step 6: Ownership safety proof** — after all applies:
+- [x] **Step 6: Ownership safety proof** — after all applies:
 
 ```bash
 az network private-dns record-set a list -g rg-cham-lab -z azure.dwsolution.co -o table | tee ../docs/evidence/phase4/protected-after.txt
@@ -1875,14 +1932,44 @@ Expected: `db` and every `vm-test-*` auto-registered record byte-identical (the 
 **Files:**
 - Modify: `README.md:46` (check Phase 4 box), `docs/decisions.md` (ADR-006), `docs/runbook.md` (demo steps verified)
 
-- [ ] **Step 1: Run the runbook split-horizon demo end to end**
+**Done 2026-08-08, with one part of Step 1 not demonstrated — see below.**
+Evidence in `docs/evidence/phase4/split-horizon.txt`. Public half: HTTPS 200,
+`<h1>PUBLIC — resolved via Cloudflare</h1>`, from the GitHub Pages addresses.
+Internal half: `dig +short -p 1053 @127.0.0.1 www.dwsolution.co` → `10.10.0.10`
+and `curl http://10.10.0.10/` → HTTP 200, `<h1>INTERNAL — served from the hub
+over the tunnel</h1>`. Both answers for the same name exist simultaneously.
+The hub also resolves `app.azure.dwsolution.co` → `10.10.4.30`, proving the
+reconciler's record is live in the private zone and reachable inside the VNet.
+ADR-006 added; ADR-007 added for the gap below; Phase 4 box checked.
+
+Note `nginx` is bound to `10.10.0.10:80` only — cloud-init pins the listen
+address as defense in depth — so `curl http://localhost/` **on the hub**
+returns `000`. That is correct behaviour, not a fault.
+
+**The laptop-over-tunnel path was not exercised**, for two independent
+pre-existing reasons, both recorded in ADR-007:
+
+1. There is no tunnel to bring up. Cloud-init deliberately leaves WireGuard
+   off until a human installs a real private key (`systemctl disable --now
+   wg-quick@wg0`; measured `disabled` / `inactive`), and the laptop has no
+   WireGuard installed — no `wg.exe`, no tunnel service, no config directory.
+2. Even with a tunnel, the hub answers `www` publicly. The A3 override zone
+   lives on the SpatiumDDI-managed BIND9; the hub's own BIND9 declares only
+   `lab.dwsolution.co` and has no `www` zone, so `dig @10.10.0.10
+   www.dwsolution.co` returns the GitHub Pages addresses.
+
+So the split horizon is real and proven, but it belongs to the SpatiumDDI
+resolver rather than to `10.10.0.10`. Unifying the two resolvers is a design
+decision deferred to Phase 5, not something to patch blind here.
+
+- [x] **Step 1: Run the runbook split-horizon demo end to end**
 
 1. Tunnel DOWN (`sudo wg-quick down wg0`): `curl -s https://www.dwsolution.co | head -1` → `PUBLIC — resolved via Cloudflare`.
 2. `sudo wg-quick up wg0`, then `dig +short @localhost www.dwsolution.co` → `10.10.0.10`.
 3. `curl -s --resolve www.dwsolution.co:80:10.10.0.10 http://www.dwsolution.co | head -1` → `INTERNAL — served from the hub over the tunnel` (deterministic curl form; a browser pointed at the Spatium resolver shows the same).
 4. Capture both answers side by side into `docs/evidence/phase4/split-horizon.txt`.
 
-- [ ] **Step 2: Append ADR-006 to `docs/decisions.md`**
+- [x] **Step 2: Append ADR-006 to `docs/decisions.md`**
 
 ```markdown
 ## ADR-006: CI drift detection compares edges to a committed desired-state snapshot
@@ -1897,7 +1984,7 @@ Expected: `db` and every `vm-test-*` auto-registered record byte-identical (the 
   during sessions, and sessions end with an export.
 ```
 
-- [ ] **Step 3: Close out**
+- [x] **Step 3: Close out**
 
 Check `- [x] Phase 4 — Cloudflare + reconciler v2` in README; commit README + docs + evidence:
 

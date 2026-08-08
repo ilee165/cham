@@ -124,18 +124,37 @@ class AzureProvider:
 
     @staticmethod
     def _record_set_body(record: CanonicalRecord) -> dict:
-        body: dict = {"ttl": record.ttl}
+        """Build the create_or_update body in the SDK's *wire* shape.
+
+        This must be wire JSON — `{"properties": {"ttl": …, "aRecords": …}}` —
+        not the RecordSet model's Python attribute names. The serializer maps
+        each model attribute to a wire path (`ttl` -> `properties.ttl`,
+        `a_records` -> `properties.aRecords`), and a flat snake_case dict
+        matches neither, so *every field is silently dropped*: the call still
+        returns 201 and Azure creates the record set with `ttl: 0` and an
+        empty value list. Nothing raises; the record simply has no content.
+
+        Measured against the live API — flat `{"ttl": 300, "a_records":
+        [{"ipv4_address": …}]}` produced `ttl=0 a_records=[]`, while this
+        shape and an explicit `RecordSet(...)` model both round-tripped
+        correctly. A dict is kept (rather than importing the models) so the
+        body stays a pure value that offline tests can assert on; see
+        `test_record_set_body_deserializes_into_sdk_model`, which pins the
+        shape against the real SDK model so a future rename cannot
+        reintroduce a silently-empty write.
+        """
+        props: dict = {"ttl": record.ttl}
         if record.rtype == "A":
-            body["a_records"] = [{"ipv4_address": v} for v in record.values]
+            props["aRecords"] = [{"ipv4Address": v} for v in record.values]
         elif record.rtype == "AAAA":
-            body["aaaa_records"] = [{"ipv6_address": v} for v in record.values]
+            props["aaaaRecords"] = [{"ipv6Address": v} for v in record.values]
         elif record.rtype == "CNAME":
-            body["cname_record"] = {"cname": record.values[0]}
+            props["cnameRecord"] = {"cname": record.values[0]}
         elif record.rtype == "PTR":
-            body["ptr_records"] = [{"ptrdname": v} for v in record.values]
+            props["ptrRecords"] = [{"ptrdname": v} for v in record.values]
         elif record.rtype == "TXT":
-            body["txt_records"] = [{"value": [v]} for v in record.values]
-        return body
+            props["txtRecords"] = [{"value": [v]} for v in record.values]
+        return {"properties": props}
 
     def _guard(self, records: list[CanonicalRecord]) -> None:
         """Refuse the whole diff before any call is issued.

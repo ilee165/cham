@@ -80,7 +80,8 @@ def test_apply_upserts_adds_updates_and_deletes():
     gone = CanonicalRecord(zone=Z, name="old", rtype="A", values=("10.0.0.1",))
     provider.apply(Diff(to_add=[add], to_delete=[gone]))
     assert client.record_sets.upserts == [
-        (Z, "A", "app", {"ttl": 300, "a_records": [{"ipv4_address": "10.10.4.30"}]})]
+        (Z, "A", "app",
+         {"properties": {"ttl": 300, "aRecords": [{"ipv4Address": "10.10.4.30"}]}})]
     assert client.record_sets.deletes == [(Z, "A", "old")]
 
 
@@ -91,8 +92,41 @@ def test_apply_updates_desired_record():
     actual = CanonicalRecord(zone=Z, name="web", rtype="A", values=("10.10.4.1",))
     provider.apply(Diff(to_update=[RecordUpdate(desired=desired, actual=actual)]))
     assert client.record_sets.upserts == [
-        (Z, "A", "web", {"ttl": 600, "a_records": [{"ipv4_address": "10.10.5.1"}]})]
+        (Z, "A", "web",
+         {"properties": {"ttl": 600, "aRecords": [{"ipv4Address": "10.10.5.1"}]}})]
     assert client.record_sets.deletes == []
+
+
+@pytest.mark.parametrize("rtype,values,read_back", [
+    ("A", ("10.10.4.30",), lambda rs: [r.ipv4_address for r in rs.a_records or []]),
+    ("AAAA", ("2001:db8::1",), lambda rs: [r.ipv6_address for r in rs.aaaa_records or []]),
+    ("CNAME", ("www.dwsolution.co",), lambda rs: [rs.cname_record.cname]),
+    ("PTR", ("host.lab.dwsolution.co.",), lambda rs: [r.ptrdname for r in rs.ptr_records or []]),
+    ("TXT", ("managed-by=ddi-reconciler",), lambda rs: [v for r in rs.txt_records or [] for v in r.value]),
+])
+def test_record_set_body_deserializes_into_sdk_model(rtype, values, read_back):
+    """The write body must survive the real SDK model, not just our fake client.
+
+    Regression test for a live-only defect: `_record_set_body` emitted the
+    RecordSet model's *Python attribute* names flat at the top level
+    (`{"ttl": 300, "a_records": [{"ipv4_address": …}]}`). The serializer maps
+    those attributes to wire paths under `properties`, so every field was
+    dropped, `create_or_update` still returned success, and Azure created the
+    record set with `ttl: 0` and no values. The fake client in these tests
+    stores whatever dict it is handed, so nothing here failed — the whole
+    suite stayed green while `--apply` silently wrote empty record sets.
+
+    Constructing the SDK's own RecordSet from the body closes that gap and
+    needs no credentials or network. Under the old shape this asserts
+    `ttl is None` and an empty value list.
+    """
+    RecordSet = pytest.importorskip("azure.mgmt.privatedns.models").RecordSet
+    record = CanonicalRecord(zone=Z, name="x", rtype=rtype, values=values, ttl=300)
+    rs = RecordSet(AzureProvider._record_set_body(record))
+    assert rs.ttl == 300
+    # against record.values, not the literal input: CanonicalRecord normalizes
+    # (PTR loses its trailing dot), and the body is built from the canonical form.
+    assert read_back(rs) == list(record.values)
 
 
 def test_api_failure_is_runtime_error():

@@ -1,0 +1,14 @@
+=== Azure private edge: app A ===
+10.10.4.30
+
+=== Cloudflare public edge: demo CNAME chain ===
+www.dwsolution.co.
+ilee165.github.io.
+185.199.108.153
+185.199.110.153
+185.199.109.153
+185.199.111.153
+
+=== Cloudflare public edge: reconciler-check TXT ===
+(TXT was empty on first query at T+0 — Cloudflare propagation; resolved on retry ~20s later)
+"managed-by=ddi-reconciler"
