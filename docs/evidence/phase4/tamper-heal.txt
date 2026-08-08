@@ -1,0 +1,32 @@
+=== C2 Step 4: tamper the AZURE edge (delete app), expect detect + heal ===
+--- tamper: az ... record-set a delete -n app ---
+--- dry-run (expect ADD app, exit=2) ---
+[azure-private] ADD    app A 10.10.4.30 ttl=300
+[cloudflare-public] converged (0 changes)
+summary: 1 add, 0 update, 0 delete across 2 edge(s)
+exit=2
+--- apply (heal) ---
+[azure-private] ADD    app A 10.10.4.30 ttl=300
+[azure-private] applied 1 change(s)
+[cloudflare-public] converged (0 changes)
+summary: 1 add, 0 update, 0 delete across 2 edge(s) — applied
+exit=0
+--- confirm value at the edge ---
+10.10.4.30
+
+=== C2 Step 5: tamper the CLOUDFLARE edge (demo -> example.com) ===
+--- dry-run (expect UPDATE demo, exit=2) ---
+[azure-private] converged (0 changes)
+[cloudflare-public] UPDATE demo CNAME example.com ttl=300 -> www.dwsolution.co ttl=300
+summary: 0 add, 1 update, 0 delete across 2 edge(s)
+exit=2
+--- apply then re-check (expect healed, exit=0) ---
+[azure-private] converged (0 changes)
+[cloudflare-public] UPDATE demo CNAME example.com ttl=300 -> www.dwsolution.co ttl=300
+[cloudflare-public] applied 1 change(s)
+summary: 0 add, 1 update, 0 delete across 2 edge(s) — applied
+apply exit=0
+[azure-private] converged (0 changes)
+[cloudflare-public] converged (0 changes)
+summary: 0 add, 0 update, 0 delete across 2 edge(s)
+exit=0
