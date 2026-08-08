@@ -1538,13 +1538,104 @@ git commit -m "feat(terraform): www CNAME to public page, internal page on hub f
 
 *Needs only the Phase 1 stack. Parallelizable with A4.*
 
-- [ ] **Step 1:** In the SpatiumDDI control plane, create an authoritative (master) zone `www.dwsolution.co` on the lab DNS group with a single record: `@ A 10.10.0.10` (the hub VM — where the internal page lives). This single-name-zone technique overrides just `www` while every other `dwsolution.co` name still resolves publicly.
-- [ ] **Step 2:** Verify locally (tunnel state irrelevant for resolution itself):
+- [x] **Step 1:** In the SpatiumDDI control plane, create an authoritative (master) zone `www.dwsolution.co` on the lab DNS group with a single record: `@ A 10.10.0.10` (the hub VM — where the internal page lives). This single-name-zone technique overrides just `www` — see the correction under Step 2 for what it does *not* do here.
+
+  Done 2026-08-08. Zone `www.dwsolution.co.` (`87df0c32-…`, primary, ttl 300) created in the `primary` group (`fbb26dd5-…`), one record `@ A 10.10.0.10` ttl 300 → `fqdn: www.dwsolution.co.`. Created through the API, not the UI: `POST /api/v1/dns/groups/{group_id}/zones` then `POST …/zones/{zone_id}/records`.
+
+- [x] **Step 2:** Verify locally (tunnel state irrelevant for resolution itself):
 ```bash
-dig +short @localhost www.dwsolution.co        # → 10.10.0.10 (internal answer)
-dig +short @1.1.1.1 www.dwsolution.co          # → GitHub Pages addresses (public answer)
+# NOTE: the bundled agent publishes on host port 1053, not 53 — the compose
+# default avoids colliding with anything already bound to 53. `@localhost`
+# alone silently queries the host's normal resolver and proves nothing.
+dig +short -p 1053 @127.0.0.1 www.dwsolution.co   # → 10.10.0.10 (internal answer)
+dig +short @1.1.1.1 www.dwsolution.co             # → GitHub Pages addresses (public answer)
 ```
 Both answers existing simultaneously **is** the split horizon.
+
+  Measured 2026-08-08 — both true at the same moment:
+```
+internal (-p 1053 @127.0.0.1) : 10.10.0.10
+public   (@1.1.1.1)           : ilee165.github.io. → 185.199.108.153
+                                                     185.199.109.153
+                                                     185.199.110.153
+                                                     185.199.111.153
+```
+
+**Correction to Step 1's rationale.** "Every other `dwsolution.co` name still
+resolves publicly" is **false in this deployment**, and the single-name-zone
+technique is not why. The `primary` group already carries `dwsolution.co.`
+itself as a *primary* zone holding exactly two records (`demo`,
+`reconciler-check`). BIND9 picks the most specific zone, so `www` is answered
+from the new single-name zone as intended — but every other name under the
+apex is answered *authoritatively and emptily* by that pre-existing zone
+rather than falling through to the public internet. Measured on the same run:
+
+```
+dig -p 1053 @127.0.0.1 dwsolution.co MX          → NOERROR, aa, ANSWER: 0
+dig -p 1053 @127.0.0.1 autodiscover.dwsolution.co → NXDOMAIN, aa
+dig +short @1.1.1.1 dwsolution.co MX             → 0 dwsolution-co.mail.protection.outlook.com.
+```
+
+So a client pointed at the lab resolver loses M365 mail discovery — not
+because A3 shadowed it, but because the apex zone was already there. Scope of
+the blast radius: only resolvers that use this BIND9 (lab clients over
+WireGuard). Public DNS is untouched, so real mail delivery is unaffected. If
+the lab ever needs to serve a client that also uses M365, the fix is to stop
+holding `dwsolution.co.` as a primary zone here and move `demo` /
+`reconciler-check` under a delegated lab name — that is a Phase 5 decision,
+not an A3 one.
+
+**Three defects had to be fixed before the agent would serve anything.** All
+three predate A3 and all three would equally have blocked C1–C3:
+
+1. **`DNS_AGENT_KEY` was empty in `spatiumddi/.env`.** The control plane
+   answered agent registration with `503 DNS_AGENT_KEY is not configured on
+   the control plane`, while the agent quietly fell back to the compose
+   default `changeme-dns-agent-key`. Both sides looked configured; neither
+   matched. Fixed by generating a key into `.env` (gitignored clone; backup
+   at `.env.bak-a3`).
+2. **The agent registered into the wrong group.** Upstream's
+   `docker-compose.yml` hardcodes `AGENT_GROUP: default`, so the agent
+   auto-created a group named `default` (catalog `catalog.spatium.invalid.`)
+   and joined it. Every lab zone lives in `primary`. Net effect: a server
+   with no zones and a group with no server — SERVFAIL for everything, with
+   both objects reporting healthy. Fixed with a tracked override,
+   `spatium/docker-compose.agent-group.yml`, setting `AGENT_GROUP: primary`.
+   Moving an already-registered agent also required deleting the stale
+   server row and dropping the `dns_bind9_state` volume, which caches the
+   assigned `server_id`.
+3. **The `primary` group's catalog zone name collided with a real zone.**
+   `catalog_zones_enabled: true` with `catalog_zone_name: azure.dwsolution.co`
+   — already a zone in that same group. The renderer emitted it twice and
+   `named-checkconf` rejected the file, crash-looping the agent:
+```
+named.conf:26: zone 'azure.dwsolution.co': already exists
+              previous definition: named.conf:21
+```
+   Fixed by repointing the group to a dedicated `catalog.spatium.invalid.`.
+
+**Upstream bug worth knowing:** the agent surfaces this class of failure as
+`RuntimeError: named-checkconf failed:` with an *empty* message, because it
+reads `res.stderr` while `named-checkconf` writes its diagnostics to stdout
+(`spatium_dns_agent/drivers/bind9.py:999`). Every rendered-config error is
+therefore invisible in the agent log. To recover the real error, run the
+checker against the state volume directly:
+```bash
+docker run --rm --entrypoint sh \
+  -v spatiumddi_dns_bind9_state:/var/lib/spatium-dns-agent \
+  ghcr.io/spatiumddi/dns-bind9:latest \
+  -c 'named-checkconf /var/lib/spatium-dns-agent/rendered.new/named.conf'
+```
+
+**Pre-existing data defect found while verifying (for C2, not fixed here):**
+`demo.dwsolution.co` is stored with value `www.dwsolution.co` — no trailing
+dot — so BIND9 treats it as relative and appends the origin:
+```
+dig +short -p 1053 @127.0.0.1 demo.dwsolution.co CNAME → www.dwsolution.co.dwsolution.co.
+```
+`demo` is one of the reconciler's `managed_keys`, so this is exactly the kind
+of drift C2 is meant to converge. Left in place deliberately: fixing it now
+would remove the test case. Issue #4 stays open and correct.
 
 ### Task A4: Apply the Cloudflare stack
 
