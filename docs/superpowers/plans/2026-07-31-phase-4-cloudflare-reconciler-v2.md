@@ -1550,17 +1550,75 @@ Both answers existing simultaneously **is** the split horizon.
 
 *Depends on A1, A2, and Phase 2 Task 3 (backend storage account pinned).*
 
-- [ ] **Step 1: Init + plan + apply**
+- [x] **Step 1: Init + plan + apply** — done 2026-08-07
 
 ```bash
 cd terraform/cloudflare
-terraform init
+terraform init -backend-config=backend.auto.tfbackend
 terraform plan    # expect: 2 to add (www CNAME, external-check TXT)
 terraform apply
 ```
 (The provider reads `CLOUDFLARE_API_TOKEN` from the environment; the backend uses the same storage account as the lab stack with key `cloudflare.tfstate` — ADR-004's split-state story.)
 
-- [ ] **Step 2: Verify from the outside world**
+`init` needs the explicit `-backend-config` because `main.tf` declares a
+**partial** backend — it pins `resource_group_name`, `container_name`, and
+`key`, but leaves `storage_account_name`, `subscription_id`, and `tenant_id`
+out of version control. Those live in `backend.auto.tfbackend`, which is
+gitignored (`*.tfbackend`) and therefore absent from a fresh clone; create it
+before the first init (stanza in `terraform.tfvars.example`). Without the
+flag, `init` prompts for the missing values, or fails outright under
+`-input=false`.
+
+(An earlier draft blamed `plan.yml`'s static job, which inits this directory
+with `-backend=false`. That was wrong: CI runs on an ephemeral runner and
+cannot affect a local `.terraform/`. The partial backend is the whole reason,
+and it applies to a clean clone too.)
+
+Plan matched the expectation exactly — `2 to add, 0 to change, 0 to destroy`
+— and applied clean: `lab_marker` `87842aa4…`, `www` `108aa676…`. A second
+`plan -detailed-exitcode` returned 0, so the stack is idempotent.
+
+**`dwsolution.co` is a live production zone, not a lab one.** It carries the
+Microsoft 365 records this domain's mail actually depends on: `MX` →
+`dwsolution-co.mail.protection.outlook.com`, the SPF `TXT`, the `MS=`
+verification `TXT`, plus `autodiscover` / `sip` / `lyncdiscover` /
+`enterpriseenrollment` / `enterpriseregistration` and two `SRV` records.
+Nothing here may ever delete by magnitude or by sweep. Three separate
+mechanisms keep that true, and it matters which one covers which record —
+they are not interchangeable:
+
+- **Terraform** manages only the two resources in its own state and declares
+  no `cloudflare_zone` resource, so it cannot remove a record it did not
+  create. `allow_overwrite = false` makes a surprise collision fail the apply
+  instead of clobbering the incumbent. That flag is now set explicitly on both
+  resources in `main.tf`; before this review it was only the provider default,
+  which is a weaker claim than the one originally written here — a default can
+  change under a provider upgrade, and a config property cannot be
+  "verified against the live zone" at all. Pinning it was a no-op against
+  state (`plan -detailed-exitcode` → 0), so the guard is now real without
+  having changed anything.
+- **The ADR-005 allowlist** covers the records the reconciler actually models.
+  `managed_keys` for this edge is `demo`/CNAME and `reconciler-check`/TXT,
+  disjoint from every record above including the two this task creates.
+- **A record-type filter** covers the rest, and this is the part the first
+  draft of this section got wrong. `providers/cloudflare.py` drops any type
+  not in `SUPPORTED_RECORD_TYPES = {A, AAAA, CNAME, PTR, TXT}` *before* the
+  allowlist is consulted. Of the zone's 12 records, the `MX` and both `SRV`
+  records never enter the model at all.
+
+So the honest version of the dry-run result: it reported `2 add, 0 update,
+0 delete`, and the allowlist demonstrably protected the 9 records it did
+model — including `autodiscover`, `sip`, `lyncdiscover`, both Intune CNAMEs,
+and the SPF and `MS=` TXTs. That is still the first evidence the allowlist
+holds on real infrastructure rather than on a `responses` fixture. But the
+`MX` record — the single most consequential one — was protected by the type
+filter, not by ADR-005. The original claim here ("read all 12 records") was
+false, and the distinction is load-bearing: **adding `MX` to
+`SUPPORTED_RECORD_TYPES` would silently move mail from the filter's
+protection to the allowlist's.** Anyone making that change must confirm
+`managed_keys` still excludes the apex before shipping it.
+
+- [x] **Step 2: Verify from the outside world** — done 2026-08-07
 
 ```bash
 dig +short www.dwsolution.co @1.1.1.1
@@ -1569,12 +1627,79 @@ curl -s https://www.dwsolution.co | head -1
 ```
 Expected: CNAME chain to the Pages host resolving to real IPs; `"resolved-via=cloudflare-public"`; `<h1>PUBLIC — resolved via Cloudflare</h1>` (allow time for the Pages TLS cert after A2 Step 1).
 
-- [ ] **Step 3: Verify the state split**
+`www.dwsolution.co` → `ilee165.github.io` → `185.199.108-111.153` (+ AAAA), and
+`external-check.dwsolution.co` returns `"resolved-via=cloudflare-public"`, both
+from `1.1.1.1`. `https://www.dwsolution.co` returns 200 with the expected
+`<h1>PUBLIC — resolved via Cloudflare</h1>` under full chain validation,
+served with a Let's Encrypt certificate `CN=www.dwsolution.co`
+(SAN `www.dwsolution.co`, valid 2026-08-07 → 2026-11-05).
+
+**The certificate needed a manual nudge, and this is the part to remember.**
+`repos/ilee165/www-dwsolution/pages` had `cname: www.dwsolution.co` set on
+2026-08-06, a day before this apply created the DNS record. GitHub requests a
+Let's Encrypt certificate only once the custom domain resolves, so that first
+attempt had nothing to validate and left `https_certificate: NONE` — the
+handshake fell back to the `*.github.io` wildcard, whose SANs do not cover
+this domain. **GitHub did not retry on its own.** It sat at `NONE` for 30+
+minutes after the CNAME went live, and re-`PUT`ting the same `cname` value
+did nothing for another 12. Only unsetting `cname` to `null` and immediately
+re-setting it forced revalidation, after which the certificate reached
+`state: approved` within a minute.
+
+Everything on the DNS side was ruled out before touching the repo, and the
+checks are worth repeating if this recurs: no CAA record on the zone (the
+Cloudflare record listing shows none, so nothing forbids Let's Encrypt from
+issuing); no A record shadowing the CNAME; `proxied = false`, so Cloudflare
+is DNS-only for this name and no zone-level "Always Use HTTPS" can intercept
+the challenge; and `http://www.dwsolution.co/.well-known/acme-challenge/`
+returns a plain 404 from GitHub rather than a 301, proving HTTP-01 validation
+can reach it.
+
+That last check remains valid after `https_enforced` was turned on below, and
+it is worth knowing why, because the reasonable assumption is that it would
+not. Measured after enabling enforcement: `/.well-known/acme-challenge/probe`
+still returns `404` with no `Location`, while `/` returns
+`301 → https://www.dwsolution.co/`. GitHub exempts the ACME path from the
+HTTPS redirect — it has to, or no Pages certificate could ever renew. So
+enforcement does not put the November renewal at risk, and the diagnostic
+above stays runnable exactly as written.
+
+Two harmless-looking things happen during the remove/re-add: the Pages
+`status` briefly reads `errored`, and a failed build appears in the history.
+Both are expected — the unset fails one build and the re-set triggers a good
+one, the same `errored` → `built` pair already visible from 2026-08-06. The
+site kept serving 200 throughout; there was no outage.
+
+`https_enforced` was then turned on (it can only be set once a certificate
+exists): `http://www.dwsolution.co` now answers `301` to
+`https://www.dwsolution.co/`, and the HTTPS URL still returns 200.
+
+That redirect does not disturb C3. Its internal half is
+`curl --resolve www.dwsolution.co:80:10.10.0.10 http://www.dwsolution.co`,
+which pins the connection to the hub VM — the page is served by the internal
+web root behind BIND9's override zone, so it never reaches Pages and never
+sees the redirect. The public half of that demo already used `https://`.
+
+- [x] **Step 3: Verify the state split** — done 2026-08-07
 
 ```bash
 az storage blob list --account-name <stchamtfXXXXXX> -c tfstate --auth-mode login -o table
 ```
 Expected: two blobs — `lab.tfstate` and `cloudflare.tfstate`.
+
+Both present in `rg-cham-tfstate` / `<stchamtfXXXXXX>`: `lab.tfstate` (3238 B,
+last modified 2026-08-06T10:01:59Z) and `cloudflare.tfstate` (3670 B,
+2026-08-07T18:42:30Z — written by this apply, which is what the timestamp
+rather than the size establishes). Confirms ADR-004's split — the Cloudflare
+stack shares the backend but not the state file, so a destroy of the lab stack
+cannot touch public DNS.
+
+The account name stays redacted here. It is not a credential — the backend
+uses `use_azuread_auth`, so reaching this state still requires an Entra
+identity holding Storage Blob Data Contributor — but this repo is public, the
+name is unguessable by design, and printing it hands an attacker the exact
+target to aim RBAC-probing at. `plan.yml` masks it in CI logs for the same
+reason. The real value lives only in the gitignored `*.tfbackend` file.
 
 ---
 

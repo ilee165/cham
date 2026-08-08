@@ -1,0 +1,18 @@
+# Copy to backend.auto.tfbackend (gitignored via *.tfbackend) and fill in.
+#
+# main.tf declares a PARTIAL backend: resource_group_name, container_name, and
+# key are pinned there because they are stable and not sensitive. The three
+# values below are kept out of version control — this repo is public, and the
+# state account name is the one piece of the address that is not guessable.
+# Access is still gated by Entra RBAC (the backend sets use_azuread_auth, and
+# the account has shared-key auth disabled), so these are not credentials; the
+# point is not to publish the target.
+#
+# Then:  terraform init -backend-config=backend.auto.tfbackend
+#
+# The identity running init needs Storage Blob Data Contributor on this
+# account. Contributor alone authenticates but cannot read the state blob.
+
+storage_account_name = "<state account name>"
+subscription_id      = "<subscription guid>"
+tenant_id            = "<tenant guid>"
