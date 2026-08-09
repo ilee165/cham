@@ -2,6 +2,7 @@
 from types import SimpleNamespace
 
 import pytest
+from azure.core import MatchConditions
 
 from ddi_reconciler.config import EdgeConfig
 from ddi_reconciler.model import CanonicalRecord, Diff, RecordUpdate
@@ -14,23 +15,43 @@ Z = "azure.dwsolution.co"
 UNSET = object()
 
 
-def record_set(name, rtype, *, ips=(), ttl=300, auto=False, cname=None, txt=()):
-    fields = dict(
-        name=name,
-        type=f"Microsoft.Network/privateDnsZones/{rtype}",
-        ttl=ttl,
-        a_records=[SimpleNamespace(ipv4_address=v) for v in ips] or None,
-        aaaa_records=None,
-        cname_record=SimpleNamespace(cname=cname) if cname else None,
-        ptr_records=None,
-        txt_records=[SimpleNamespace(value=[t]) for t in txt] or None,
-    )
+def etag_of(name, rtype):
+    """The deterministic ETag record_set() stamps, so tests can assert the
+    write carried exactly the value the fetch captured."""
+    return f'W/"{name}-{rtype}"'
+
+
+def record_set(name, rtype, *, ips=(), ttl=300, auto=False, cname=None, txt=(),
+               etag="__default__"):
+    fields = {
+        "name": name,
+        "type": f"Microsoft.Network/privateDnsZones/{rtype}",
+        "ttl": ttl,
+        "a_records": [SimpleNamespace(ipv4_address=v) for v in ips] or None,
+        "aaaa_records": None,
+        "cname_record": SimpleNamespace(cname=cname) if cname else None,
+        "ptr_records": None,
+        "txt_records": [SimpleNamespace(value=[t]) for t in txt] or None,
+    }
     if auto is not UNSET:
         fields["is_auto_registered"] = auto
+    if etag is not UNSET:
+        fields["etag"] = etag_of(name, rtype) if etag == "__default__" else etag
     return SimpleNamespace(**fields)
 
 
+class FakePreconditionFailure(Exception):
+    """What azure.core raises when a conditional write loses: an
+    HttpResponseError subclass carrying status_code 412. The provider is
+    duck-typed on status_code, so this fake needs nothing more."""
+    status_code = 412
+
+
 class FakeRecordSets:
+    """CR-03: the fake accepts the SDK's keyword-only precondition arguments
+    and records them, so a provider that stops sending them fails loudly here
+    instead of silently going back to unconditional replaces."""
+
     def __init__(self, listing):
         self.listing = listing
         self.upserts = []
@@ -39,11 +60,13 @@ class FakeRecordSets:
     def list(self, resource_group, zone):
         return iter(self.listing)
 
-    def create_or_update(self, resource_group, zone, rtype, name, body):
-        self.upserts.append((zone, rtype, name, body))
+    def create_or_update(self, resource_group, zone, rtype, name, body, *,
+                         etag=None, match_condition=None):
+        self.upserts.append((zone, rtype, name, body, etag, match_condition))
 
-    def delete(self, resource_group, zone, rtype, name):
-        self.deletes.append((zone, rtype, name))
+    def delete(self, resource_group, zone, rtype, name, *,
+               etag=None, match_condition=None):
+        self.deletes.append((zone, rtype, name, etag, match_condition))
 
 
 def make_provider(listing):
@@ -74,26 +97,34 @@ def test_fetch_maps_cname_and_txt():
 
 
 def test_apply_upserts_adds_updates_and_deletes():
-    provider, client = make_provider([])
+    """CR-03: an ADD is create-only (IfMissing, no etag to hold), and a DELETE
+    is conditional on the exact ETag the fetch captured (IfNotModified)."""
+    provider, client = make_provider([record_set("old", "A", ips=["10.0.0.1"])])
     provider.fetch_actual({Z})
     add = CanonicalRecord(zone=Z, name="app", rtype="A", values=("10.10.4.30",))
     gone = CanonicalRecord(zone=Z, name="old", rtype="A", values=("10.0.0.1",))
     provider.apply(Diff(to_add=[add], to_delete=[gone]))
     assert client.record_sets.upserts == [
         (Z, "A", "app",
-         {"properties": {"ttl": 300, "aRecords": [{"ipv4Address": "10.10.4.30"}]}})]
-    assert client.record_sets.deletes == [(Z, "A", "old")]
+         {"properties": {"ttl": 300, "aRecords": [{"ipv4Address": "10.10.4.30"}]}},
+         None, MatchConditions.IfMissing)]
+    assert client.record_sets.deletes == [
+        (Z, "A", "old", etag_of("old", "A"), MatchConditions.IfNotModified)]
 
 
 def test_apply_updates_desired_record():
-    provider, client = make_provider([])
+    """CR-03: an UPDATE writes over a record the fetch read, so it carries that
+    read's ETag and IfNotModified — a record mutated since then answers 412
+    instead of being replaced."""
+    provider, client = make_provider([record_set("web", "A", ips=["10.10.4.1"])])
     provider.fetch_actual({Z})
     desired = CanonicalRecord(zone=Z, name="web", rtype="A", values=("10.10.5.1",), ttl=600)
     actual = CanonicalRecord(zone=Z, name="web", rtype="A", values=("10.10.4.1",))
     provider.apply(Diff(to_update=[RecordUpdate(desired=desired, actual=actual)]))
     assert client.record_sets.upserts == [
         (Z, "A", "web",
-         {"properties": {"ttl": 600, "aRecords": [{"ipv4Address": "10.10.5.1"}]}})]
+         {"properties": {"ttl": 600, "aRecords": [{"ipv4Address": "10.10.5.1"}]}},
+         etag_of("web", "A"), MatchConditions.IfNotModified)]
     assert client.record_sets.deletes == []
 
 
@@ -156,7 +187,7 @@ def test_apply_error_on_create_or_update():
 def test_apply_error_on_delete():
     class FailingRecordSets:
         def list(self, resource_group, zone):
-            return iter(())
+            return iter((record_set("old", "A", ips=["10.0.0.1"]),))
         def create_or_update(self, *args, **kwargs):
             pass
         def delete(self, *args, **kwargs):
@@ -274,6 +305,86 @@ def test_provider_still_refuses_the_collision_when_apply_is_called_directly():
         provider.apply(Diff(to_add=[add]))
     assert client.record_sets.upserts == []
     assert client.record_sets.deletes == []
+
+
+# --- CR-03 (2026-08-08 review): the list-to-write race ----------------------
+
+def test_add_is_create_only_so_a_race_arrival_cannot_be_clobbered():
+    """The reproduction: the fetch sees an empty zone; auto-registration
+    creates `app` before the queued ADD lands. An unconditional
+    create_or_update is a replace — the VM's own record would be overwritten
+    and the re-fetch would show the manual value, so the run would report
+    success over silent data loss. IfMissing turns that write into a 412."""
+    class RacingRecordSets(FakeRecordSets):
+        def create_or_update(self, resource_group, zone, rtype, name, body, *,
+                             etag=None, match_condition=None):
+            assert match_condition is MatchConditions.IfMissing
+            raise FakePreconditionFailure("the record arrived first")
+
+    client = SimpleNamespace(record_sets=RacingRecordSets([]))
+    provider = AzureProvider("sub-id", "rg", client=client)
+    assert provider.fetch_actual({Z}) == []          # zone empty at list time
+    add = CanonicalRecord(zone=Z, name="app", rtype="A", values=("10.10.4.30",))
+    with pytest.raises(RuntimeError, match="changed between this run's read"):
+        provider.apply(Diff(to_add=[add]))
+    assert client.record_sets.upserts == []          # nothing recorded as written
+
+
+def test_a_delete_that_loses_the_race_is_a_readable_refusal_not_a_clobber():
+    """Same race on the destructive path: the record was manual at list time
+    but changed hands (or content) before the DELETE. The stale ETag makes
+    Azure answer 412; the provider must surface that as a re-run instruction,
+    not as an opaque apply failure."""
+    class RacingRecordSets(FakeRecordSets):
+        def delete(self, resource_group, zone, rtype, name, *,
+                   etag=None, match_condition=None):
+            assert etag == etag_of("old", "A")
+            assert match_condition is MatchConditions.IfNotModified
+            raise FakePreconditionFailure("etag mismatch")
+
+    client = SimpleNamespace(
+        record_sets=RacingRecordSets([record_set("old", "A", ips=["10.0.0.1"])]))
+    provider = AzureProvider("sub-id", "rg", client=client)
+    provider.fetch_actual({Z})
+    gone = CanonicalRecord(zone=Z, name="old", rtype="A", values=("10.0.0.1",))
+    with pytest.raises(RuntimeError, match="Re-run the reconciler"):
+        provider.apply(Diff(to_delete=[gone]))
+
+
+def test_a_missing_etag_refuses_the_write_before_anything_lands():
+    """Fail closed: without the ETag from this run's read, an UPDATE or DELETE
+    cannot be made conditional, and an unconditional write is the CR-03 race
+    again. The refusal happens before ANY call in the diff is issued — the
+    all-or-nothing property the guard already promises."""
+    provider, client = make_provider([
+        record_set("web", "A", ips=["10.10.4.1"], etag=UNSET),
+        record_set("safe", "A", ips=["10.10.6.1"]),
+    ])
+    provider.fetch_actual({Z})
+    desired = CanonicalRecord(zone=Z, name="web", rtype="A", values=("10.10.5.1",))
+    actual = CanonicalRecord(zone=Z, name="web", rtype="A", values=("10.10.4.1",))
+    safe_add = CanonicalRecord(zone=Z, name="new", rtype="A", values=("10.10.7.1",))
+    with pytest.raises(RuntimeError, match="no ETag"):
+        provider.apply(Diff(to_add=[safe_add],
+                            to_update=[RecordUpdate(desired=desired, actual=actual)]))
+    assert client.record_sets.upserts == []          # the add did not run either
+
+
+def test_a_refetch_refreshes_the_captured_etag():
+    """The ETag a write carries must be the one from the read that planned it:
+    a second fetch_actual() (the runner's post-apply verification) replaces
+    the stored value rather than keeping the first read's forever."""
+    first = record_set("web", "A", ips=["10.10.4.1"], etag='W/"gen-1"')
+    second = record_set("web", "A", ips=["10.10.4.1"], etag='W/"gen-2"')
+    client = SimpleNamespace(record_sets=FakeRecordSets([first]))
+    provider = AzureProvider("sub-id", "rg", client=client)
+    provider.fetch_actual({Z})
+    client.record_sets.listing = [second]
+    provider.fetch_actual({Z})
+    desired = CanonicalRecord(zone=Z, name="web", rtype="A", values=("10.10.5.1",))
+    actual = CanonicalRecord(zone=Z, name="web", rtype="A", values=("10.10.4.1",))
+    provider.apply(Diff(to_update=[RecordUpdate(desired=desired, actual=actual)]))
+    assert client.record_sets.upserts[0][4] == 'W/"gen-2"'
 
 
 # --- WR-3: one unowned malformed record must not abort the run -------------
