@@ -13,6 +13,15 @@ terraform {
   }
 }
 
+# WR-02 (2026-08-08 review): every "internal lab space" consumer — DNS/HTTP
+# NSG sources, the BIND ACL, and NAT source matching — derives from the module
+# inputs. Previously these hard-coded 10.10.0.0/16, so a caller supplying
+# spokes outside that aggregate got transit rules that followed the variable
+# while DNS access and Internet NAT silently did not.
+locals {
+  internal_cidrs = concat([var.address_space], var.spoke_address_spaces)
+}
+
 resource "azurerm_virtual_network" "hub" {
   name                = "vnet-hub"
   location            = var.location
@@ -89,7 +98,7 @@ resource "azurerm_network_security_group" "hub" {
     protocol                   = "*"
     source_port_range          = "*"
     destination_port_ranges    = ["53"]
-    source_address_prefixes    = ["10.10.0.0/16", var.onprem_address_space, var.wg_transfer_cidr]
+    source_address_prefixes    = concat(local.internal_cidrs, [var.onprem_address_space, var.wg_transfer_cidr])
     destination_address_prefix = var.hub_vm_ip
   }
 
@@ -110,7 +119,7 @@ resource "azurerm_network_security_group" "hub" {
     protocol                   = "Tcp"
     source_port_range          = "*"
     destination_port_range     = "80"
-    source_address_prefixes    = ["10.10.0.0/16", var.onprem_address_space, var.wg_transfer_cidr]
+    source_address_prefixes    = concat(local.internal_cidrs, [var.onprem_address_space, var.wg_transfer_cidr])
     destination_address_prefix = var.hub_vm_ip
   }
 
@@ -277,6 +286,9 @@ resource "azurerm_linux_virtual_machine" "hub" {
   custom_data = base64encode(replace(templatefile("${path.module}/cloud-init.yml.tpl", {
     onprem_cidr      = var.onprem_address_space
     wg_transfer_cidr = var.wg_transfer_cidr
+    # WR-02: hub + spoke CIDRs for the BIND ACL and the NAT script, so
+    # DNS access and masquerading follow the same inputs the NSG rules do.
+    internal_cidrs = local.internal_cidrs
     # WG interface address derived from wg_transfer_cidr (host .1, same mask)
     # so the tunnel follows the variable instead of a hardcoded 172.16.0.1/24.
     # Renders identically to the old literal under the default CIDR.

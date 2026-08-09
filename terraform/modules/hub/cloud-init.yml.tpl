@@ -33,8 +33,8 @@ write_files:
       options {
         directory "/var/cache/bind";
         recursion yes;
-        allow-query { 10.10.0.0/16; ${onprem_cidr}; ${wg_transfer_cidr}; localhost; };
-        allow-recursion { 10.10.0.0/16; ${onprem_cidr}; ${wg_transfer_cidr}; localhost; };
+        allow-query { ${join("; ", internal_cidrs)}; ${onprem_cidr}; ${wg_transfer_cidr}; localhost; };
+        allow-recursion { ${join("; ", internal_cidrs)}; ${onprem_cidr}; ${wg_transfer_cidr}; localhost; };
         // Default path: Azure-provided DNS (Private DNS zones resolve here)
         forwarders { 168.63.129.16; };
         forward only;
@@ -60,9 +60,25 @@ write_files:
         echo "Unable to discover the default outbound interface" >&2
         exit 1
       fi
-      if ! iptables -t nat -C POSTROUTING -s 10.10.0.0/16 ! -d 10.0.0.0/8 -o "$outbound_interface" -j MASQUERADE 2>/dev/null; then
-        iptables -t nat -A POSTROUTING -s 10.10.0.0/16 ! -d 10.0.0.0/8 -o "$outbound_interface" -j MASQUERADE
+      # WR-02: sources and private destinations derive from the module inputs
+      # instead of the old hard-coded lab-aggregate/RFC1918 `-s ... ! -d` pair.
+      # iptables cannot express "not in {A,B,C}" in one rule, so traffic from
+      # any internal network toward any private destination (internal,
+      # on-prem, WireGuard transfer) RETURNs un-NATed first — inserted at the
+      # top so they always precede the MASQUERADE — and everything else from
+      # internal space masquerades out the default interface.
+%{ for dst in concat(internal_cidrs, [onprem_cidr, wg_transfer_cidr]) ~}
+%{ for src in internal_cidrs ~}
+      if ! iptables -t nat -C POSTROUTING -s ${src} -d ${dst} -j RETURN 2>/dev/null; then
+        iptables -t nat -I POSTROUTING -s ${src} -d ${dst} -j RETURN
       fi
+%{ endfor ~}
+%{ endfor ~}
+%{ for src in internal_cidrs ~}
+      if ! iptables -t nat -C POSTROUTING -s ${src} -o "$outbound_interface" -j MASQUERADE 2>/dev/null; then
+        iptables -t nat -A POSTROUTING -s ${src} -o "$outbound_interface" -j MASQUERADE
+      fi
+%{ endfor ~}
       netfilter-persistent save
 
   - path: /var/www/html/index.html
