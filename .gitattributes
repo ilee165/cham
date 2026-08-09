@@ -2,3 +2,9 @@
 # Added after a review flagged apparent CRLF/trailing-whitespace README
 # changes that traced to client-side autocrlf, not blob content.
 * text=auto
+
+# Shell scripts execute where LF is load-bearing: a CRLF checkout puts \r
+# into case patterns and exit statements. Force LF in the working copy too,
+# so the local test run (tests/test_drift_exit_contract.py) exercises the
+# same bytes CI does.
+*.sh text eol=lf
