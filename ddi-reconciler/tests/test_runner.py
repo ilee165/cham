@@ -323,6 +323,59 @@ def test_a_split_key_outside_the_managed_set_is_ignored():
     assert result.split_ttl_keys == ()
 
 
+# --- CR-04: a proxied RRset drifts through the key set, like a split one ----
+
+class ProxiedProvider(FakeProvider):
+    def __init__(self, actual, proxied_keys=(), split_ttl_keys=()):
+        super().__init__(actual)
+        self.proxied_keys = set(proxied_keys)
+        self.split_ttl_keys = set(split_ttl_keys)
+
+    def apply(self, diff):
+        super().apply(diff)
+        self.proxied_keys.clear()   # apply() re-pins DNS-only
+        self.split_ttl_keys.clear()
+
+
+def test_a_proxied_rrset_drifts_even_when_values_and_ttl_match():
+    """CR-04's invisible case at the runner: Auto TTL 1 on both sides, values
+    equal — the diff alone says converged while the edge serves through the
+    proxy. The out-of-band flag must force the update."""
+    live = rec("app", "10.10.4.30")
+    provider = ProxiedProvider([live], proxied_keys={(Z, "app", "A")})
+    result = plan_edge(EDGE, [live], provider, truth_complete=True)
+    assert not result.diff.is_converged
+    assert [u.desired.key for u in result.diff.to_update] == [(Z, "app", "A")]
+    assert result.proxied_keys == ((Z, "app", "A"),)
+
+
+def test_a_key_both_split_and_proxied_is_updated_exactly_once():
+    """The two out-of-band channels share one forced-update pass; a key in
+    both must not produce two UPDATEs for the same RRset."""
+    live = rec("app", "10.10.4.30")
+    provider = ProxiedProvider([live], proxied_keys={(Z, "app", "A")},
+                               split_ttl_keys={(Z, "app", "A")})
+    result = plan_edge(EDGE, [live], provider, truth_complete=True)
+    assert len(result.diff.to_update) == 1
+    assert result.split_ttl_keys == ((Z, "app", "A"),)
+    assert result.proxied_keys == ((Z, "app", "A"),)
+
+
+def test_a_proxied_key_outside_the_managed_set_is_ignored():
+    provider = ProxiedProvider([rec("app", "10.10.4.30")],
+                               proxied_keys={(Z, "someone-else", "A")})
+    result = plan_edge(EDGE, [rec("app", "10.10.4.30")], provider, truth_complete=True)
+    assert result.diff.is_converged
+    assert result.proxied_keys == ()
+
+
+def test_a_proxied_rrset_converges_after_apply():
+    live = rec("app", "10.10.4.30")
+    provider = ProxiedProvider([live], proxied_keys={(Z, "app", "A")})
+    apply_edge(EDGE, [live], provider, truth_complete=True)
+    assert provider.apply_calls == 1
+
+
 # --- on_mutate: the CLI's evidence that a write was actually attempted ------
 
 def test_on_mutate_fires_only_once_a_write_is_about_to_happen():

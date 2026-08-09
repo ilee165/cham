@@ -86,18 +86,24 @@ class _ArgumentParser(argparse.ArgumentParser):
 
 def _print_diff(edge_name: str, diff: Diff,
                 dropped: tuple[CanonicalRecord, ...] = (),
-                split_ttl_keys: tuple[RecordKey, ...] = ()) -> None:
+                split_ttl_keys: tuple[RecordKey, ...] = (),
+                proxied_keys: tuple[RecordKey, ...] = ()) -> None:
     """Print one edge's plan. TTLs are printed as the integers they are —
     there is no sentinel to translate any more (CR-5). A split RRset shows the
-    shortest TTL it really serves, annotated, so an UPDATE that appears to
-    change nothing still explains itself."""
+    shortest TTL it really serves, and a proxied RRset the Auto TTL it really
+    serves (CR-04) — both annotated, so an UPDATE that appears to change
+    nothing still explains itself."""
     split = set(split_ttl_keys)
+    proxied = set(proxied_keys)
     for r in sorted(dropped, key=lambda r: r.key):
         print(f"[{edge_name}] SKIP   {r.name} {r.rtype} (not in managed_keys)")
     for r in sorted(diff.to_add, key=lambda r: r.key):
         print(f"[{edge_name}] ADD    {r.name} {r.rtype} {','.join(r.values)} ttl={r.ttl}")
     for u in sorted(diff.to_update, key=lambda u: u.desired.key):
-        note = "  (edge TTLs are split)" if u.desired.key in split else ""
+        reasons = ([] if u.desired.key not in split else ["edge TTLs are split"]) + \
+                  ([] if u.desired.key not in proxied
+                   else ["edge record is proxied; DNS-only will be enforced"])
+        note = f"  ({'; '.join(reasons)})" if reasons else ""
         print(f"[{edge_name}] UPDATE {u.desired.name} {u.desired.rtype} "
               f"{','.join(u.actual.values)} ttl={u.actual.ttl} -> "
               f"{','.join(u.desired.values)} ttl={u.desired.ttl}{note}")
@@ -175,9 +181,9 @@ def main(argv: list[str] | None = None) -> int:
             raise ConfigError(f"no provider constructed for edge(s): {', '.join(missing)}")
 
         adds = updates = deletes = 0
-        guards = dict(truth_complete=truth_verified,
-                      allow_empty_truth=args.allow_empty_truth,
-                      allow_unverified_truth=args.allow_unverified_truth)
+        guards = {"truth_complete": truth_verified,
+                  "allow_empty_truth": args.allow_empty_truth,
+                  "allow_unverified_truth": args.allow_unverified_truth}
         for edge in edges:
             current = edge.name
             mutating.clear()
@@ -187,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 result = plan_edge(edge, desired_all, providers[edge.name], **guards)
             _print_diff(edge.name, result.diff, result.dropped_desired,
-                        result.split_ttl_keys)
+                        result.split_ttl_keys, result.proxied_keys)
             changes = (len(result.diff.to_add) + len(result.diff.to_update)
                        + len(result.diff.to_delete))
             if args.apply and changes:
