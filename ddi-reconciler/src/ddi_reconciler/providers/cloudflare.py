@@ -24,6 +24,18 @@ Three consequences of that shape are load-bearing here:
 * TXT content crosses the wire in DNS presentation form ("a" "b"), so reads
   decode it and writes encode it — they are inverses (WR-13).
 
+DNS-only proxy policy (CR-04, 2026-08-08 review): this reconciler's records
+are plain DNS, so `proxied: false` is provider policy, enforced on every
+write, and *observed* on every read. A record turned orange-cloud serves
+Cloudflare's uneditable Auto TTL (1), so the drift either loops forever as a
+TTL-only PATCH that cannot take effect, or — when desired TTL is also 1 —
+becomes invisible. Proxy state therefore rides out of band in `proxied_keys`,
+exactly like split TTLs: runner.plan_edge forces an UPDATE for a managed
+proxied key, apply() PATCHes `proxied: false` together with the desired TTL,
+and the post-apply re-fetch proves it took. The field is REQUIRED on reads of
+proxiable types (A/AAAA/CNAME): a payload without it cannot prove DNS-only,
+and assuming false re-opens the invisible-tamper hole.
+
 The provider is bound to exactly one zone and refuses to read or write any
 other, whatever the caller passes (CR-4).
 
@@ -66,6 +78,11 @@ _TTL_MIN, _TTL_MAX = 60, 86400
 # is a real multi-value RRset and KEEPS create-before-delete.
 _SINGLE_VALUE_TYPES = frozenset({"CNAME"})
 
+# Types Cloudflare can proxy. Reads REQUIRE the `proxied` field for these
+# (CR-04) and every write re-pins it to false; PTR/TXT cannot be proxied and
+# are left alone.
+_PROXIABLE_TYPES = frozenset({"A", "AAAA", "CNAME"})
+
 _RECORD_FIELDS = frozenset({"id", "type", "name", "content", "ttl"})
 
 
@@ -96,6 +113,12 @@ class CloudflareProvider:
         # equal the one reported below. Re-derived per fetch, never sticky:
         # after apply() normalizes the set it is no longer split.
         self.split_ttl_keys: set[RecordKey] = set()
+        # RRsets with at least one proxied API record in the last fetch
+        # (CR-04). Same out-of-band contract as split_ttl_keys and for the
+        # same reason: a proxied record's Auto TTL (1) is a value a desired
+        # record may legitimately carry, so nothing in the CanonicalRecord
+        # can encode "proxied" without colliding with real data.
+        self.proxied_keys: set[RecordKey] = set()
 
     # --- plumbing -----------------------------------------------------------
     @staticmethod
@@ -148,8 +171,7 @@ class CloudflareProvider:
         name = canonical_name(fqdn)
         if name == self.zone_name:
             return "@"
-        suffix = "." + self.zone_name
-        return name[: -len(suffix)] if name.endswith(suffix) else name
+        return name.removesuffix("." + self.zone_name)
 
     def _fqdn(self, name: str) -> str:
         return self.zone_name if name == "@" else f"{name}.{self.zone_name}"
@@ -330,6 +352,7 @@ class CloudflareProvider:
         self._api_records.clear()
         self.skipped.clear()
         self.split_ttl_keys.clear()
+        self.proxied_keys.clear()
         grouped: dict[RecordKey, dict] = {}
         for raw in raw_records:
             if not isinstance(raw, dict) or not _RECORD_FIELDS <= raw.keys():
@@ -339,6 +362,18 @@ class CloudflareProvider:
             if rtype not in SUPPORTED_RECORD_TYPES:
                 continue
             key = (self.zone_name, self._relative(str(raw["name"])), rtype)
+            if rtype in _PROXIABLE_TYPES:
+                # CR-04: DNS-only policy cannot be enforced blind. A proxiable
+                # record without a boolean `proxied` is an API contract break,
+                # and assuming false is how a proxy tamper goes invisible.
+                proxied = raw.get("proxied")
+                if not isinstance(proxied, bool):
+                    raise RuntimeError(
+                        f"cloudflare API error: record {raw.get('id')!r} "
+                        f"({'/'.join(key)}) carries no usable 'proxied' field "
+                        f"({proxied!r}); DNS-only policy cannot be verified for it")
+                if proxied:
+                    self.proxied_keys.add(key)
             self._api_records.setdefault(key, []).append(raw)
             entry = grouped.setdefault(key, {"values": [], "ttls": set()})
             entry["values"].append(self._content(raw))
@@ -362,6 +397,7 @@ class CloudflareProvider:
                 self.skipped.append((key, str(exc)))
                 self._api_records.pop(key, None)
                 self.split_ttl_keys.discard(key)  # nothing to force-update
+                self.proxied_keys.discard(key)
                 self._warn(
                     f"skipping cloudflare record {zone}/{name}/{rtype}, which this "
                     f"reconciler does not own and cannot represent: {exc}")
@@ -375,6 +411,19 @@ class CloudflareProvider:
             "content": self._wire_content(record.rtype, value),
             "ttl": record.ttl, "proxied": False,
         })
+
+    @staticmethod
+    def _patch_body(rtype: str, **fields) -> dict:
+        """A PATCH body that re-pins DNS-only policy on proxiable types.
+
+        Every update to an A/AAAA/CNAME carries `proxied: false` (CR-04):
+        the only writer of these records is this reconciler, its policy is
+        DNS-only, and a PATCH that omits the field leaves an orange-clouded
+        record proxied — serving Auto TTL — no matter what TTL it writes.
+        """
+        if rtype in _PROXIABLE_TYPES:
+            fields["proxied"] = False
+        return fields
 
     def _record(self, existing: dict[str, dict], value: str, key: RecordKey) -> dict:
         """The raw API record carrying `value` — or an error that says which of
@@ -411,7 +460,9 @@ class CloudflareProvider:
                 self._check_ttl(want)
                 self._request(
                     "PATCH", f"/zones/{zone_id}/dns_records/{raw['id']}",
-                    json={"content": self._wire_content(want.rtype, new), "ttl": want.ttl})
+                    json=self._patch_body(want.rtype,
+                                          content=self._wire_content(want.rtype, new),
+                                          ttl=want.ttl))
                 existing.pop(old)
 
         # Multi-value RRsets KEEP create-before-delete: the window between the
@@ -428,12 +479,14 @@ class CloudflareProvider:
         # TTL lives on the API record, not the RRset, so the RRset-level
         # have.ttl can hide a record that disagrees. Decide per surviving
         # record: everything else in the set was just written with want.ttl.
+        # A record still proxied is drift even at an equal TTL (its Auto TTL
+        # of 1 may legitimately match desired), so it is PATCHed regardless.
         for value in sorted(set(want.values) & set(have.values)):
             raw = self._record(existing, value, want.key)
-            if self._ttl_of(raw) != want.ttl:
+            if self._ttl_of(raw) != want.ttl or raw.get("proxied") is True:
                 self._check_ttl(want)
                 self._request("PATCH", f"/zones/{zone_id}/dns_records/{raw['id']}",
-                              json={"ttl": want.ttl})
+                              json=self._patch_body(want.rtype, ttl=want.ttl))
 
     def apply(self, diff: Diff) -> None:
         # Zone binding first, for every record in every branch: refusing after

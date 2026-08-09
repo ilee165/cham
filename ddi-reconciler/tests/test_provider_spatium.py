@@ -287,6 +287,47 @@ def test_pagination_that_does_not_advance_is_fatal():
         SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
 
 
+@responses.activate
+def test_overlapping_pages_cannot_hide_a_missing_record():
+    """CR-01 (2026-08-08 review): pages A,B / B,C against total=4. The duplicate
+    B fills the raw count, so the walk used to be certified complete while a
+    fourth record never arrived — and a managed record absent from certified
+    truth reads as a delete order downstream. Overlap must be fatal, never
+    counted toward the total."""
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a"), rec("b", "10.0.0.2")],
+                                 "total": 4, "page": 1, "page_size": 2})
+    responses.get(RECORDS, json={"items": [rec("b", "10.0.0.2"), rec("c", "10.0.0.3")],
+                                 "total": 4, "page": 2, "page_size": 2})
+    with pytest.raises(RuntimeError, match="already seen in this walk"):
+        SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+
+
+@responses.activate
+def test_a_duplicate_item_within_one_page_is_fatal():
+    """Same defect at page granularity: a duplicated row satisfies the declared
+    total while a real record is missing. There is no legitimate duplicate —
+    every live item carries a unique id."""
+    one_group_one_zone()
+    responses.get(RECORDS, json=page([rec("a"), rec("a")], total=2))
+    with pytest.raises(RuntimeError, match="already seen in this walk"):
+        SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+
+
+@responses.activate
+def test_a_total_that_changes_mid_walk_is_fatal():
+    """CR-01: the first declared total is the contract for the whole walk. A
+    total that moves between pages means the collection is being mutated under
+    the read, so 'complete' cannot be certified against either number."""
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a")], "total": 3,
+                                 "page": 1, "page_size": 1})
+    responses.get(RECORDS, json={"items": [rec("b", "10.0.0.2")], "total": 2,
+                                 "page": 2, "page_size": 1})
+    with pytest.raises(RuntimeError, match="declared total changed"):
+        SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+
+
 # --- CR-1: what "the read was complete" is allowed to mean ------------------
 
 @responses.activate
@@ -386,6 +427,8 @@ def test_malformed_group_payload_is_spatium_api_error(groups_json):
     [{"id": ZID}],                # zone entry without a name
     [{"name": "test.zone."}],     # zone entry without an id
     ["test.zone."],               # not an object at all
+    [{"id": ZID, "name": None}],          # CR-02: null name must not str() to "None"
+    [{"id": ZID, "name": ["test.zone."]}],  # CR-02: wrong-typed name is malformed
 ])
 def test_malformed_zone_payload_is_spatium_api_error(zones_json):
     responses.get(GROUPS, json=[group()])
@@ -403,6 +446,17 @@ def test_malformed_zone_payload_is_spatium_api_error(zones_json):
     {"name": "a", "record_type": "A", "ttl": 300},                  # no value
     {"name": "a", "record_type": "A", "value": "10.0.0.1", "ttl": "soon"},
     "a.test.zone. A 10.0.0.1",                                      # not an object
+    # CR-02 (2026-08-08 review): required keys PRESENT with the wrong type.
+    # str() coercion used to turn these into skips or literal garbage values.
+    {"name": "a", "record_type": None, "value": "10.0.0.1", "ttl": 300},
+    {"name": "a", "record_type": ["A"], "value": "10.0.0.1", "ttl": 300},
+    {"name": "a", "record_type": {"kind": "A"}, "value": "10.0.0.1", "ttl": 300},
+    {"name": "a", "record_type": "", "value": "10.0.0.1", "ttl": 300},
+    {"name": None, "record_type": "A", "value": "10.0.0.1", "ttl": 300},
+    {"name": ["a"], "record_type": "A", "value": "10.0.0.1", "ttl": 300},
+    {"name": "a", "record_type": "A", "value": None, "ttl": 300},
+    {"name": "a", "record_type": "A", "value": ["10.0.0.1"], "ttl": 300},
+    {"name": "a", "record_type": "TXT", "value": 123, "ttl": 300},
 ])
 def test_malformed_record_payload_is_spatium_api_error(record_json):
     """Regression: these were bare KeyErrors, which escape the CLI's handled
@@ -413,6 +467,40 @@ def test_malformed_record_payload_is_spatium_api_error(record_json):
     responses.get(RECORDS, json=page([record_json], total=1))
     with pytest.raises(RuntimeError, match="spatium API error"):
         SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+
+
+@responses.activate
+def test_a_null_typed_record_is_fatal_not_silently_dropped():
+    """CR-02 (2026-08-08 review), the exact reproduction: a verified envelope
+    carrying one valid record plus one whose record_type is JSON null. str()
+    turned null into "None" -> "NONE" -> 'unsupported' -> silent skip, while
+    the count-based completeness check had already certified the read — so the
+    dropped record's key became an authorized delete at the edge. A malformed
+    required field must fail the read; only a well-formed nonempty string may
+    be judged unsupported."""
+    one_group_one_zone()
+    responses.get(RECORDS, json=page([
+        rec("a"),
+        {"name": "d", "record_type": None, "value": "10.0.0.4", "ttl": 300},
+    ], total=2))
+    provider = SpatiumProvider(BASE, token="t")
+    with pytest.raises(RuntimeError, match="record_type"):
+        provider.fetch_desired({"test.zone"})
+    # The raise happens inside the fetch, so no desired set — complete or
+    # otherwise — ever reaches the planner: deletion is structurally blocked.
+
+
+@responses.activate
+def test_a_well_formed_unsupported_type_is_still_skipped():
+    """The boundary CR-02 must not move: SRV is a real, well-formed type this
+    reconciler does not manage. Skipping it is scope, not data loss."""
+    one_group_one_zone()
+    responses.get(RECORDS, json=page([rec("a"), rec("srv", "0 0 0 x", rtype="SRV")],
+                                     total=2))
+    provider = SpatiumProvider(BASE, token="t")
+    records = provider.fetch_desired({"test.zone"})
+    assert [r.name for r in records] == ["a"]
+    assert provider.read_verified is True
 
 
 @responses.activate

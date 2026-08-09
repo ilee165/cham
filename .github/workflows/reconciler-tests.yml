@@ -37,6 +37,11 @@ jobs:
       - name: Install
         run: uv sync --frozen
 
+      - name: Lint (ruff)
+        # WR-03: the documented local gate (`uv run ruff check .`) runs here
+        # too, so it cannot silently drop out of the dev environment again.
+        run: uv run ruff check .
+
       - name: Test suite (no credentials in the environment)
         # The env block below pins each credential to empty for this step, so a
         # test that quietly depends on one fails here instead of passing on a
@@ -65,6 +70,13 @@ jobs:
           keys = {r.key for r in records}
 
           print(f"{len(records)} records, truth_verified={verified}")
+          if not verified:
+              # WR-01/exit-condition: fail closed, don't just print. An
+              # unverified snapshot makes nightly drift refuse deletions and
+              # silently degrades the gate; it must not merge unnoticed.
+              raise SystemExit("snapshot is marked truth_verified=false — the read "
+                               "behind it could not be proven complete. Re-export "
+                               "with `cham-reconcile --export` from a verified read.")
           unowned = keys - managed
           if unowned:
               raise SystemExit(f"snapshot carries records outside managed_keys: {sorted(unowned)}")

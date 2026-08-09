@@ -93,7 +93,8 @@ Endpoint refresh: resolve the hub endpoint with
 before editing the peer `Endpoint`; never hardcode it or record it in
 evidence.
 
-Idempotent hub key behavior: the install script replaces the
+Idempotent hub key behavior: the hub key install procedure (operator-run on
+the hub; there is no tracked script for it in this repository) replaces the
 `REPLACE_ON_HOST` marker exactly once and otherwise requires the stored and
 configured keys to match. A mismatch is a stop condition; nothing rotates
 implicitly on retry.
@@ -145,8 +146,53 @@ separately approved experiment (~$2, timeboxed).
    exact removal plan, then apply that saved plan.
 7. Verify: portal shows no dnspr-* resources
 
+## Reconciler snapshot + drift operations (ADR-006)
+
+The scheduled `nightly-drift` workflow checks **only the public Cloudflare
+edge** (`--edge cloudflare-public`), because the Azure lab is destroyed
+between sessions and a nightly job that is always red tells you nothing —
+see the amended ADR-006 and the comment in `.github/workflows/drift.yml`.
+The Azure edge is checked by hand during live sessions.
+
+Every session that changed truth ends with:
+
+1. `cd ddi-reconciler && uv run cham-reconcile --export desired-records.json`
+   (the Spatium stack must be up). The export refuses to shrink the committed
+   snapshot and marks an unprovable read `truth_verified=false`; CI rejects an
+   unverified snapshot, so re-export from a healthy stack rather than forcing.
+2. Review the `git diff` of `desired-records.json` — every dropped record is
+   a standing delete order for the next `--apply`.
+3. Commit the snapshot with the session's changes.
+
+Checking and healing drift by hand:
+
+- `uv run cham-reconcile --dry-run` → exit 0 converged / 2 drift / 1 error.
+- Review the printed plan, then `uv run cham-reconcile --apply`. Apply
+  re-verifies convergence and fails (exit 1) if the edge still drifts.
+- A nightly `drift`-labeled issue contains the diff; heal locally with
+  `--apply`, close the issue, and re-dispatch the workflow to confirm green.
+
 ## Split-horizon demo (interview)
-1. Browser → https://www.dwsolution.co (tunnel DOWN) → public page
-2. `sudo wg-quick up wg0`, flush DNS cache
-3. Same URL → internal page served via BIND9 internal answer
-4. Narrate: same FQDN, two answers, one repo managing both
+
+What the split horizon **is** (proven, `docs/evidence/phase4/split-horizon.txt`):
+the public internet resolves `www.dwsolution.co` through Cloudflare to the
+GitHub Pages site, while the SpatiumDDI-managed resolver answers the same
+name with the hub's private IP, whose nginx serves the internal page. Per
+ADR-007, the internal answer belongs to the **SpatiumDDI resolver** — the
+hub's own BIND9 has no `www` override and returns the public answer, so a
+tunnel client pointed at `10.10.0.10` does NOT see the internal page.
+
+1. Public half: `dig +short @1.1.1.1 www.dwsolution.co` → Pages addresses;
+   `curl -s https://www.dwsolution.co | head -1` → `PUBLIC` page.
+2. Internal half (lab up, Spatium stack running): `dig +short -p 1053
+   @127.0.0.1 www.dwsolution.co` → `10.10.0.10`, then from a host that can
+   reach the hub's private IP (hub SSH session, or a spoke VM):
+   `curl -s http://10.10.0.10/ | head -1` → `INTERNAL` page.
+3. Narrate: same FQDN, two simultaneous answers; the public half managed by
+   this repo, the internal override rendered by the SpatiumDDI control plane;
+   naming which resolver serves which answer is part of the demo (ADR-007).
+
+The browser-over-tunnel version of this demo (tunnel up → same URL flips to
+the internal page) requires the ADR-007 resolver unification plus the
+operator WireGuard key step, both scheduled in Phase 5 — do not present it
+as available until then.

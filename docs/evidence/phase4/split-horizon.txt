@@ -1,6 +1,6 @@
 Phase 4 Task C3 Step 1 — split-horizon demo
 Measured 2026-08-08, lab redeployed the same day (36 resources, eastus2).
-hub_public_ip=20.110.104.204  hub_private_ip=10.10.0.10
+hub_public_ip=<redacted per runbook rule; resolve via terraform output>  hub_private_ip=10.10.0.10
 
 ================================================================
 PUBLIC HALF — resolved via Cloudflare, served by GitHub Pages
@@ -71,6 +71,14 @@ Both are pre-existing conditions, not regressions.
    means generating a hub private key, patching wg0.conf, and installing
    WireGuard on the laptop — an operator step the design intends a human
    to perform, not a gap in this task.
+
+   [Correction, 2026-08-08 final review: the three checks above examined
+   the Windows host, but the documented Phase 3 laptop endpoint is
+   WireGuard inside Debian WSL2 (/etc/wireguard/wg0.conf — see the
+   runbook's key locations). The WSL2 side was not checked in this
+   session, so "absent" is proven only for the Windows host. The
+   conclusion stands regardless: the hub side is measured disabled, so
+   there was no tunnel to bring up from either endpoint.]
 
 2. Even with the tunnel up, the hub would answer `www` publicly.
    The A3 override zone lives in the SpatiumDDI-managed BIND9 (the agent

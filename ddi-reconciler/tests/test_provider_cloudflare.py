@@ -37,8 +37,8 @@ def methods_and_paths():
 def test_fetch_groups_rrsets_dequotes_txt_and_maps_apex():
     register_zone()
     register_records([
-        {"id": "1", "type": "A", "name": "api.dwsolution.co", "content": "1.1.1.1", "ttl": 300},
-        {"id": "2", "type": "A", "name": "api.dwsolution.co", "content": "1.1.1.2", "ttl": 300},
+        {"id": "1", "type": "A", "name": "api.dwsolution.co", "content": "1.1.1.1", "ttl": 300, "proxied": False},
+        {"id": "2", "type": "A", "name": "api.dwsolution.co", "content": "1.1.1.2", "ttl": 300, "proxied": False},
         {"id": "3", "type": "TXT", "name": "dwsolution.co", "content": "\"marker\"", "ttl": 300},
         {"id": "4", "type": "MX", "name": "dwsolution.co", "content": "mail.x", "ttl": 300},
     ])
@@ -53,7 +53,7 @@ def test_fetch_groups_rrsets_dequotes_txt_and_maps_apex():
 def test_apply_fans_out_add_and_delete_per_value():
     register_zone()
     register_records([
-        {"id": "old1", "type": "A", "name": "demo.dwsolution.co", "content": "9.9.9.9", "ttl": 300},
+        {"id": "old1", "type": "A", "name": "demo.dwsolution.co", "content": "9.9.9.9", "ttl": 300, "proxied": False},
     ])
     provider = CloudflareProvider(Z, "token")
     actual = provider.fetch_actual({Z})[0]
@@ -72,8 +72,8 @@ def test_apply_fans_out_add_and_delete_per_value():
 def test_delete_removes_every_value_record():
     register_zone()
     register_records([
-        {"id": "d1", "type": "A", "name": "gone.dwsolution.co", "content": "1.1.1.1", "ttl": 300},
-        {"id": "d2", "type": "A", "name": "gone.dwsolution.co", "content": "1.1.1.2", "ttl": 300},
+        {"id": "d1", "type": "A", "name": "gone.dwsolution.co", "content": "1.1.1.1", "ttl": 300, "proxied": False},
+        {"id": "d2", "type": "A", "name": "gone.dwsolution.co", "content": "1.1.1.2", "ttl": 300, "proxied": False},
     ])
     provider = CloudflareProvider(Z, "token")
     actual = provider.fetch_actual({Z})[0]
@@ -131,7 +131,7 @@ def test_apply_ttl_only_update_patches_kept_value():
     existing record's ttl in place -- no add/delete round-trip."""
     register_zone()
     register_records([
-        {"id": "ttl1", "type": "A", "name": "ttl.dwsolution.co", "content": "5.5.5.5", "ttl": 300},
+        {"id": "ttl1", "type": "A", "name": "ttl.dwsolution.co", "content": "5.5.5.5", "ttl": 300, "proxied": False},
     ])
     provider = CloudflareProvider(Z, "token")
     actual = provider.fetch_actual({Z})[0]
@@ -145,7 +145,8 @@ def test_apply_ttl_only_update_patches_kept_value():
                                json={"success": True, "result": {}})
     provider.apply(Diff(to_update=[RecordUpdate(desired=desired, actual=actual)]))
     assert patched.call_count == 1
-    assert json.loads(patched.calls[0].request.body) == {"ttl": 600}
+    # CR-04: every write to a proxiable record re-pins DNS-only policy.
+    assert json.loads(patched.calls[0].request.body) == {"ttl": 600, "proxied": False}
     assert created.call_count == 0
     assert deleted.call_count == 0
 
@@ -158,7 +159,7 @@ def test_cname_retarget_patches_in_place_and_never_creates_a_second_record():
     register_zone()
     register_records([
         {"id": "cn1", "type": "CNAME", "name": "demo.dwsolution.co",
-         "content": "old.example.com", "ttl": 300},
+         "content": "old.example.com", "ttl": 300, "proxied": False},
     ])
     provider = CloudflareProvider(Z, "token")
     actual = provider.fetch_actual({Z})[0]
@@ -173,7 +174,7 @@ def test_cname_retarget_patches_in_place_and_never_creates_a_second_record():
     provider.apply(Diff(to_update=[RecordUpdate(desired=desired, actual=actual)]))
     assert patched.call_count == 1
     assert json.loads(patched.calls[0].request.body) == {
-        "content": "new.example.com", "ttl": 300}
+        "content": "new.example.com", "ttl": 300, "proxied": False}
     assert created.call_count == 0 and deleted.call_count == 0
 
 
@@ -183,8 +184,8 @@ def test_multi_value_a_keeps_create_before_delete():
     window between the two over-serves instead of under-serving."""
     register_zone()
     register_records([
-        {"id": "a1", "type": "A", "name": "api.dwsolution.co", "content": "1.1.1.1", "ttl": 300},
-        {"id": "a2", "type": "A", "name": "api.dwsolution.co", "content": "1.1.1.2", "ttl": 300},
+        {"id": "a1", "type": "A", "name": "api.dwsolution.co", "content": "1.1.1.1", "ttl": 300, "proxied": False},
+        {"id": "a2", "type": "A", "name": "api.dwsolution.co", "content": "1.1.1.2", "ttl": 300, "proxied": False},
     ])
     provider = CloudflareProvider(Z, "token")
     actual = provider.fetch_actual({Z})[0]
@@ -242,9 +243,9 @@ def test_split_ttl_rrset_is_flagged_whatever_the_api_order(ttls, capsys):
     register_zone()
     register_records([
         {"id": "s1", "type": "A", "name": "split.dwsolution.co",
-         "content": "10.0.0.1", "ttl": ttls[0]},
+         "content": "10.0.0.1", "ttl": ttls[0], "proxied": False},
         {"id": "s2", "type": "A", "name": "split.dwsolution.co",
-         "content": "10.0.0.2", "ttl": ttls[1]},
+         "content": "10.0.0.2", "ttl": ttls[1], "proxied": False},
     ])
     provider = CloudflareProvider(Z, "token")
     actual = provider.fetch_actual({Z})[0]
@@ -261,9 +262,9 @@ def test_split_ttl_is_reported_out_of_band_not_as_a_sentinel_ttl():
     register_zone()
     register_records([
         {"id": "s1", "type": "A", "name": "split.dwsolution.co",
-         "content": "10.0.0.1", "ttl": 300},
+         "content": "10.0.0.1", "ttl": 300, "proxied": False},
         {"id": "s2", "type": "A", "name": "split.dwsolution.co",
-         "content": "10.0.0.2", "ttl": 2147483647},
+         "content": "10.0.0.2", "ttl": 2147483647, "proxied": False},
     ])
     provider = CloudflareProvider(Z, "token")
     actual = provider.fetch_actual({Z})[0]
@@ -278,9 +279,9 @@ def test_uniform_ttl_rrset_is_never_flagged_as_split():
     register_zone()
     register_records([
         {"id": "u1", "type": "A", "name": "same.dwsolution.co",
-         "content": "10.0.0.1", "ttl": 300},
+         "content": "10.0.0.1", "ttl": 300, "proxied": False},
         {"id": "u2", "type": "A", "name": "same.dwsolution.co",
-         "content": "10.0.0.2", "ttl": 300},
+         "content": "10.0.0.2", "ttl": 300, "proxied": False},
     ])
     provider = CloudflareProvider(Z, "token")
     assert provider.fetch_actual({Z})[0].ttl == 300
@@ -294,9 +295,9 @@ def test_split_flag_is_cleared_by_the_next_fetch():
     register_zone()
     register_records([
         {"id": "s1", "type": "A", "name": "split.dwsolution.co",
-         "content": "10.0.0.1", "ttl": 60},
+         "content": "10.0.0.1", "ttl": 60, "proxied": False},
         {"id": "s2", "type": "A", "name": "split.dwsolution.co",
-         "content": "10.0.0.2", "ttl": 300},
+         "content": "10.0.0.2", "ttl": 300, "proxied": False},
     ])
     provider = CloudflareProvider(Z, "token")
     provider.fetch_actual({Z})
@@ -306,9 +307,9 @@ def test_split_flag_is_cleared_by_the_next_fetch():
     register_zone()
     register_records([
         {"id": "s1", "type": "A", "name": "split.dwsolution.co",
-         "content": "10.0.0.1", "ttl": 300},
+         "content": "10.0.0.1", "ttl": 300, "proxied": False},
         {"id": "s2", "type": "A", "name": "split.dwsolution.co",
-         "content": "10.0.0.2", "ttl": 300},
+         "content": "10.0.0.2", "ttl": 300, "proxied": False},
     ])
     provider.fetch_actual({Z})
     assert provider.split_ttl_keys == set()
@@ -321,9 +322,9 @@ def test_split_ttl_apply_normalizes_every_record_in_the_rrset():
     register_zone()
     register_records([
         {"id": "s1", "type": "A", "name": "split.dwsolution.co",
-         "content": "10.0.0.1", "ttl": 300},
+         "content": "10.0.0.1", "ttl": 300, "proxied": False},
         {"id": "s2", "type": "A", "name": "split.dwsolution.co",
-         "content": "10.0.0.2", "ttl": 60},
+         "content": "10.0.0.2", "ttl": 60, "proxied": False},
     ])
     provider = CloudflareProvider(Z, "token")
     actual = provider.fetch_actual({Z})[0]
@@ -335,16 +336,17 @@ def test_split_ttl_apply_normalizes_every_record_in_the_rrset():
                                     json={"success": True, "result": {}})
     provider.apply(Diff(to_update=[RecordUpdate(desired=desired, actual=actual)]))
     assert patched_split.call_count == 1
-    assert json.loads(patched_split.calls[0].request.body) == {"ttl": 300}
+    assert json.loads(patched_split.calls[0].request.body) == {"ttl": 300,
+                                                              "proxied": False}
     assert patched_ok.call_count == 0  # already at the desired TTL
 
 
 def _register_split_rrset(ttls=(300, 60)):
     register_records([
         {"id": "s1", "type": "A", "name": "split.dwsolution.co",
-         "content": "10.0.0.1", "ttl": ttls[0]},
+         "content": "10.0.0.1", "ttl": ttls[0], "proxied": False},
         {"id": "s2", "type": "A", "name": "split.dwsolution.co",
-         "content": "10.0.0.2", "ttl": ttls[1]},
+         "content": "10.0.0.2", "ttl": ttls[1], "proxied": False},
     ])
 
 
@@ -380,7 +382,7 @@ def test_a_split_rrset_converges_in_one_apply():
                               values=("10.0.0.1", "10.0.0.2"), ttl=300)
     apply_edge(SPLIT_EDGE, [desired], CloudflareProvider(Z, "token"), truth_complete=True)
     assert patched.call_count == 1
-    assert json.loads(patched.calls[0].request.body) == {"ttl": 300}
+    assert json.loads(patched.calls[0].request.body) == {"ttl": 300, "proxied": False}
 
 
 @responses.activate
@@ -392,7 +394,7 @@ def test_unmanaged_malformed_record_is_skipped_not_fatal(capsys):
         {"id": "bad", "type": "TXT", "name": "someone-else.dwsolution.co",
          "content": '"  "', "ttl": 300},
         {"id": "ok", "type": "CNAME", "name": "demo.dwsolution.co",
-         "content": "www.dwsolution.co", "ttl": 300},
+         "content": "www.dwsolution.co", "ttl": 300, "proxied": False},
     ])
     provider = CloudflareProvider(Z, "token", managed_keys={(Z, "demo", "CNAME")})
     records = provider.fetch_actual({Z})
@@ -451,9 +453,9 @@ def test_zone_name_is_url_encoded_into_the_query():
 def test_pagination_reads_every_page():
     register_zone()
     register_records([{"id": "p1", "type": "A", "name": "one.dwsolution.co",
-                       "content": "1.1.1.1", "ttl": 300}], total_pages=2, page=1)
+                       "content": "1.1.1.1", "ttl": 300, "proxied": False}], total_pages=2, page=1)
     register_records([{"id": "p2", "type": "A", "name": "two.dwsolution.co",
-                       "content": "2.2.2.2", "ttl": 300}], total_pages=2, page=2)
+                       "content": "2.2.2.2", "ttl": 300, "proxied": False}], total_pages=2, page=2)
     provider = CloudflareProvider(Z, "token")
     assert {r.key for r in provider.fetch_actual({Z})} == {(Z, "one", "A"), (Z, "two", "A")}
     assert (Z, "two", "A") in provider._api_records
@@ -465,9 +467,9 @@ def test_missing_result_info_does_not_truncate_the_fetch():
     records this tool owns were invisible and the run printed `converged`."""
     register_zone()
     for page, result in ((1, [{"id": "p1", "type": "A", "name": "one.dwsolution.co",
-                               "content": "1.1.1.1", "ttl": 300}]),
+                               "content": "1.1.1.1", "ttl": 300, "proxied": False}]),
                          (2, [{"id": "p2", "type": "A", "name": "two.dwsolution.co",
-                               "content": "2.2.2.2", "ttl": 300}]),
+                               "content": "2.2.2.2", "ttl": 300, "proxied": False}]),
                          (3, [])):
         responses.get(f"{API}/zones/zid/dns_records?per_page=100&page={page}",
                       json={"success": True, "result": result})
@@ -479,7 +481,7 @@ def test_missing_result_info_does_not_truncate_the_fetch():
 def test_null_result_info_is_not_an_uncaught_attribute_error():
     register_zone()
     for page, result in ((1, [{"id": "p1", "type": "A", "name": "one.dwsolution.co",
-                               "content": "1.1.1.1", "ttl": 300}]), (2, [])):
+                               "content": "1.1.1.1", "ttl": 300, "proxied": False}]), (2, [])):
         responses.get(f"{API}/zones/zid/dns_records?per_page=100&page={page}",
                       json={"success": True, "result": result, "result_info": None})
     records = CloudflareProvider(Z, "token").fetch_actual({Z})
@@ -526,7 +528,7 @@ def test_index_miss_after_a_fetch_does_not_blame_a_missing_fetch():
     register_zone()
     register_records([
         {"id": "m1", "type": "A", "name": "moved.dwsolution.co",
-         "content": "1.1.1.1", "ttl": 300},
+         "content": "1.1.1.1", "ttl": 300, "proxied": False},
     ])
     provider = CloudflareProvider(Z, "token")
     provider.fetch_actual({Z})
@@ -560,7 +562,7 @@ def test_automatic_ttl_one_is_written_and_read_unchanged():
     value on both sides, and must not be rewritten into false drift."""
     register_zone()
     register_records([{"id": "auto", "type": "A", "name": "auto.dwsolution.co",
-                       "content": "1.1.1.1", "ttl": 1}])
+                       "content": "1.1.1.1", "ttl": 1, "proxied": False}])
     provider = CloudflareProvider(Z, "token")
     assert provider.fetch_actual({Z})[0].ttl == 1
     created = responses.post(f"{API}/zones/zid/dns_records",
@@ -602,12 +604,127 @@ def test_multi_string_txt_is_concatenated_not_outer_stripped():
     assert record.values == ("v=DKIM1; p=AAAABBBB",)
 
 
+# --- CR-04 (2026-08-08 review): proxy mode is provider state, not noise ------
+
+DEMO_EDGE = EdgeConfig(name="cf", provider="cloudflare", zone=Z,
+                       managed_keys=frozenset({(Z, "demo", "CNAME")}))
+
+
+def _demo_cname(proxied, ttl):
+    return {"id": "cn1", "type": "CNAME", "name": "demo.dwsolution.co",
+            "content": "www.dwsolution.co", "ttl": ttl, "proxied": proxied}
+
+
+@responses.activate
+def test_a_proxied_record_is_flagged_and_forces_an_update():
+    """The invisible half of CR-04: an orange-clouded record serves Cloudflare
+    Auto TTL (1). If desired TTL is also 1, values and TTL compare equal and
+    the tamper used to be undetectable. The proxy state rides out of band —
+    exactly like split TTLs — and forces the update."""
+    register_zone()
+    register_records([_demo_cname(proxied=True, ttl=1)])
+    provider = CloudflareProvider(Z, "token")
+    desired = CanonicalRecord(zone=Z, name="demo", rtype="CNAME",
+                              values=("www.dwsolution.co",), ttl=1)
+    result = plan_edge(DEMO_EDGE, [desired], provider, truth_complete=True)
+    assert provider.proxied_keys == {(Z, "demo", "CNAME")}
+    assert not result.diff.is_converged
+    assert result.proxied_keys == ((Z, "demo", "CNAME"),)
+
+
+@responses.activate
+def test_a_proxied_tamper_heals_in_one_apply():
+    """The visible half: proxied + Auto TTL vs desired DNS-only ttl=300. The
+    old provider PATCHed only the TTL, Cloudflare kept serving Auto, and the
+    post-apply re-fetch raised ConvergenceError forever. The PATCH must carry
+    proxied:false with the desired TTL, and the re-fetch must prove it."""
+    register_zone()
+    register_records([_demo_cname(proxied=True, ttl=1)])
+    register_records([_demo_cname(proxied=False, ttl=300)])  # what the re-fetch sees
+    patched = responses.patch(f"{API}/zones/zid/dns_records/cn1",
+                              json={"success": True, "result": {"id": "cn1"}})
+    desired = CanonicalRecord(zone=Z, name="demo", rtype="CNAME",
+                              values=("www.dwsolution.co",), ttl=300)
+    apply_edge(DEMO_EDGE, [desired], CloudflareProvider(Z, "token"), truth_complete=True)
+    assert patched.call_count == 1
+    assert json.loads(patched.calls[0].request.body) == {"ttl": 300, "proxied": False}
+
+
+@responses.activate
+def test_a_proxied_tamper_with_matching_auto_ttl_also_heals():
+    """CR-04's worst case end to end: desired TTL is 1 (automatic), so nothing
+    in the value/TTL diff moves at all — only the out-of-band flag drives the
+    write, and it must still converge on the re-fetch."""
+    register_zone()
+    register_records([_demo_cname(proxied=True, ttl=1)])
+    register_records([_demo_cname(proxied=False, ttl=1)])
+    patched = responses.patch(f"{API}/zones/zid/dns_records/cn1",
+                              json={"success": True, "result": {"id": "cn1"}})
+    desired = CanonicalRecord(zone=Z, name="demo", rtype="CNAME",
+                              values=("www.dwsolution.co",), ttl=1)
+    apply_edge(DEMO_EDGE, [desired], CloudflareProvider(Z, "token"), truth_complete=True)
+    assert patched.call_count == 1
+    assert json.loads(patched.calls[0].request.body) == {"ttl": 1, "proxied": False}
+
+
+@responses.activate
+def test_a_proxiable_record_without_the_proxied_field_is_fatal():
+    """DNS-only policy cannot be enforced blind: a proxiable record whose
+    payload no longer carries `proxied` is an API contract break, and assuming
+    false would re-open the invisible-tamper hole this finding closed."""
+    register_zone()
+    register_records([{"id": "x", "type": "A", "name": "api.dwsolution.co",
+                       "content": "1.1.1.1", "ttl": 300}])
+    with pytest.raises(RuntimeError, match="proxied"):
+        CloudflareProvider(Z, "token").fetch_actual({Z})
+
+
+@responses.activate
+def test_a_non_proxiable_record_needs_no_proxied_field():
+    """TXT/PTR cannot be proxied; their fixtures (and any API shape that omits
+    the field for them) must keep working unchanged."""
+    register_zone()
+    register_records([{"id": "t1", "type": "TXT", "name": "note.dwsolution.co",
+                       "content": '"v"', "ttl": 300}])
+    records = CloudflareProvider(Z, "token").fetch_actual({Z})
+    assert [r.key for r in records] == [(Z, "note", "TXT")]
+
+
+@responses.activate
+def test_proxied_flag_is_cleared_by_the_next_fetch():
+    """Mirrors the split-TTL rule: apply() disables the proxy, so the
+    convergence re-check must not still see the key as proxied."""
+    register_zone()
+    register_records([_demo_cname(proxied=True, ttl=1)])
+    provider = CloudflareProvider(Z, "token")
+    provider.fetch_actual({Z})
+    assert provider.proxied_keys
+
+    responses.reset()
+    register_zone()
+    register_records([_demo_cname(proxied=False, ttl=300)])
+    provider.fetch_actual({Z})
+    assert provider.proxied_keys == set()
+
+
+@responses.activate
+def test_an_unowned_malformed_proxied_record_does_not_linger_in_the_flag_set():
+    register_zone()
+    register_records([
+        {"id": "bad", "type": "CNAME", "name": "someone-else.dwsolution.co",
+         "content": ".", "ttl": 1, "proxied": True},  # canonicalizes to empty
+    ])
+    provider = CloudflareProvider(Z, "token", managed_keys={(Z, "demo", "CNAME")})
+    provider.fetch_actual({Z})
+    assert provider.proxied_keys == set()
+
+
 @responses.activate
 def test_aaaa_ipv6_normalization_in_value_updates():
     register_zone()
     register_records([
         {"id": "ipv6_1", "type": "AAAA", "name": "v6.dwsolution.co",
-         "content": "2001:0DB8::0001", "ttl": 300},
+         "content": "2001:0DB8::0001", "ttl": 300, "proxied": False},
     ])
     provider = CloudflareProvider(Z, "token")
     actual = provider.fetch_actual({Z})[0]

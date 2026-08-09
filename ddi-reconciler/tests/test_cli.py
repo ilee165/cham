@@ -541,6 +541,26 @@ def test_a_split_rrset_is_drift_at_the_cli_and_is_named_as_split(
     assert "converged (0 changes)" not in out
 
 
+class ProxiedCliProvider(FakeProvider):
+    def __init__(self, actual, proxied_keys=()):
+        super().__init__(actual)
+        self.proxied_keys = set(proxied_keys)
+
+
+def test_a_proxied_rrset_is_drift_at_the_cli_and_named_as_proxied(
+        files, monkeypatch, capsys):
+    """CR-04 end-to-end at the CLI: values and TTL agree, so without the
+    out-of-band flag this printed `converged (0 changes)` and exited 0 while
+    the record served through Cloudflare's proxy."""
+    config, desired = files
+    provider = ProxiedCliProvider([record("app")], proxied_keys={(Z, "app", "A")})
+    assert run_cli(monkeypatch, provider, config, desired, "--dry-run") == 2
+    out = capsys.readouterr().out
+    assert "UPDATE app A 10.10.4.30 ttl=300 -> 10.10.4.30 ttl=300" in out
+    assert "edge record is proxied" in out
+    assert "converged (0 changes)" not in out
+
+
 def test_a_legal_high_ttl_prints_as_itself_on_every_edge(files, monkeypatch, capsys):
     """The sentinel bled sideways: cli._ttl applied a Cloudflare-specific value
     to every edge, so an Azure record with a legal ttl=2147483647 rendered as

@@ -65,9 +65,23 @@ interview material as much as documentation.
   (committed). Nightly drift runs
   `cham-reconcile --dry-run --desired-from-file desired-records.json` and keys
   off the exit code (0 converged / 2 drift / 1 error).
+- **Amended 2026-08-08 (scope of the scheduled run):** the live workflow
+  deliberately checks **only the public edge**
+  (`--dry-run --edge cloudflare-public`), with the read-only token and no
+  Azure credentials. The Azure lab is destroyed between sessions for cost
+  control, so an unattended two-edge run would fail every night on a resource
+  group that is absent by design — and a permanently red job detects nothing.
+  The Azure edge is checked by hand during live sessions; extending the
+  schedule to gate on lab presence is Phase 5 work. The operational
+  procedure — export at session end, snapshot diff review, drift-issue
+  healing — lives in the runbook's "Reconciler snapshot + drift operations"
+  section. CI additionally rejects a committed snapshot whose
+  `truth_verified` flag is false, so an unprovable read cannot become the
+  standing truth the nightly job acts on.
 - **Tradeoff accepted:** The snapshot can lag live truth between sessions, so
   CI detects "edge vs last-exported truth". Acceptable: truth only changes
-  during sessions, and sessions end with an export.
+  during sessions, and sessions end with an export. Between sessions the
+  Azure edge is unmonitored; accepted because the edge does not exist then.
 
 ## ADR-007: The `www` split horizon lives on the SpatiumDDI resolver, not the hub
 - **Context:** Two independent BIND9 instances serve this lab. The hub's is

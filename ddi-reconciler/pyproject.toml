@@ -10,7 +10,9 @@ requires-python = ">=3.11"
 dependencies = [
   "requests>=2.32",
   "azure-identity>=1.17",
-  "azure-mgmt-privatedns>=1.1",
+  # >=2.0: the CR-03 conditional writes use the keyword-only
+  # etag=/match_condition= convention this generation introduced.
+  "azure-mgmt-privatedns>=2.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -20,7 +22,25 @@ packages = ["src/ddi_reconciler"]
 cham-reconcile = "ddi_reconciler.cli:main"
 
 [dependency-groups]
-dev = ["pytest", "responses>=0.25"]
+dev = [
+    "pytest",
+    "responses>=0.25",
+    "ruff>=0.12",
+]
+
+[tool.ruff.lint]
+# TRY004 wants TypeError from isinstance guards. This codebase's deliberate
+# contract is RuntimeError("<provider> API error ...") for every malformed
+# payload: RuntimeError is in cli.main's handled tuple and maps to exit 1,
+# while a TypeError would escape as a traceback and break the 0/1/2 contract
+# the drift workflow depends on. The guard style is intentional.
+ignore = ["TRY004"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests raise bare Exception on purpose: the fakes simulate "whatever the SDK
+# might throw", and the assertion under test is that ANY exception is wrapped
+# into the RuntimeError contract.
+"tests/*" = ["TRY002"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["ddi_reconciler"]

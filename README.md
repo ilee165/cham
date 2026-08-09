@@ -7,7 +7,9 @@ from this repo with Terraform and converged by a Python reconciler.
 
 Named for cham or 참 meaning geniune in Korean Hanja: the core demo is **split-horizon
 resolution** — `www.dwsolution.co` answers differently inside and outside
-the lab, both answers managed here.
+the lab. The public answer is Terraform-managed in this repo; the internal
+override lives in the SpatiumDDI control plane (created by hand in Task A3 —
+ADR-007 records which resolver serves it).
 
 ## What this demonstrates
 - **Terraform** — reusable modules (one spoke module, two instantiations),
@@ -58,16 +60,27 @@ was made. Start with ADR-001.
 - [x] Phase 4 — Cloudflare + reconciler v2
 - [ ] Phase 5 — CI/CD pipeline
 
-All six of Phase 4's exit criteria hold, with evidence under
-`docs/evidence/phase4/`: the offline suite passes with no credentials and no
-network, the exit-code contract is proven live (1 operational error / 2 drift
-/ 0 converged), first convergence applied the three seeded records and an
-immediate re-run is a no-op, tampering each edge is detected and healed, the
-before/after listings differ by exactly the reconciler's own record, and the
-Cloudflare stack applies from its own state file with only a scoped token.
+Phase 4 defined **eight** exit criteria. Seven hold as written, with evidence
+under `docs/evidence/phase4/`: the offline suite passes with no credentials
+and no network, the exit-code contract is proven live (1 operational error /
+2 drift / 0 converged), first convergence applied the three seeded records
+and an immediate re-run is a no-op, tampering each edge is detected and
+healed, the before/after listings differ by exactly the reconciler's own
+record, the Cloudflare stack applies from its own state file with only a
+scoped token, and the snapshot/ADR-006/README closeout items are done. The
+eighth — the runbook's laptop-over-tunnel split-horizon demo — was
+**redefined, not met**: the split horizon is real and captured
+(`split-horizon.txt`), but it is served by the SpatiumDDI resolver; a client
+using the hub's own resolver over the tunnel gets the public answer, and no
+tunnel run was performed (ADR-007).
 
-Two things Phase 4 did **not** settle, both deferred to Phase 5 with the
-reasoning in [docs/decisions.md](docs/decisions.md): the `www` split horizon
-is served by the SpatiumDDI resolver and not by the hub's own BIND9
-(ADR-007), and the laptop-to-hub WireGuard tunnel is still the manual
-key-generation step cloud-init leaves to an operator.
+Four things Phase 4 did **not** settle, deferred with reasoning in
+[docs/decisions.md](docs/decisions.md) and scheduled in the Phase 5 plan's
+carried-forward work section: the `www` split horizon is served by the
+SpatiumDDI resolver and not by the hub's own BIND9 (ADR-007); the
+laptop-to-hub WireGuard tunnel is still the manual key-generation step
+cloud-init leaves to an operator; the SpatiumDDI apex zone shadows this
+domain's live Microsoft 365 records for lab-resolver clients (recorded in the
+Phase 4 plan's A4 notes); and the truth-side `demo` CNAME value is stored
+without its trailing dot, so SpatiumDDI's own BIND9 renders it relative
+(issue #9 — the reconciler is structurally immune, the lab resolver is not).

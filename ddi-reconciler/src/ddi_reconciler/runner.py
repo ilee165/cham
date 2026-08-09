@@ -62,6 +62,11 @@ class EdgeResult:
     # TTLs. Kept so the CLI can say why an RRset is being updated to the TTL
     # it already appears to have.
     split_ttl_keys: tuple[RecordKey, ...] = field(default_factory=tuple)
+    # Managed keys the provider reported as proxied at the edge (CR-04:
+    # Cloudflare orange-cloud tamper). Same contract as split_ttl_keys: the
+    # drift rides beside the diff because the record's visible TTL (Auto = 1)
+    # is a value desired state may legitimately carry.
+    proxied_keys: tuple[RecordKey, ...] = field(default_factory=tuple)
 
 
 def _candidate_fqdns(record: CanonicalRecord) -> tuple[str, ...]:
@@ -139,30 +144,32 @@ def _partition_desired(
     return managed, dropped, near_misses
 
 
-def _force_split_ttl_updates(diff: Diff, split_keys: tuple[RecordKey, ...],
-                             desired: list[CanonicalRecord],
-                             actual: list[CanonicalRecord]) -> None:
-    """Make a split-TTL RRset drift even when its reported TTL matches desired.
+def _force_updates(diff: Diff, keys: tuple[RecordKey, ...],
+                   desired: list[CanonicalRecord],
+                   actual: list[CanonicalRecord]) -> None:
+    """Make an out-of-band-drifted RRset drift even when its diff says equal.
 
-    The provider reports one real TTL for an RRset that holds several, so a
-    desired TTL equal to that one compares equal and the set reads converged
-    while still serving two lifetimes. The split rides in split_ttl_keys rather
-    than in the TTL scalar precisely so this cannot be papered over by choosing
-    a number, and this is where that flag is spent: an UPDATE whose desired and
-    actual values are identical still drives the provider's per-record TTL
-    normalization.
+    Two provider-side conditions ride beside the diff rather than in the
+    record: split per-record TTLs (CR-5) and edge-side proxy mode (CR-04).
+    Both share the same shape — the value the provider can report (shortest
+    TTL, Auto TTL 1) is a value desired state may legitimately carry, so the
+    two compare equal while the edge is still wrong. This is where those flags
+    are spent: an UPDATE whose desired and actual records are identical still
+    drives the provider's per-record normalization (TTL and/or proxied:false).
+    A key in both sets is appended once.
     """
     pending = ({record.key for record in diff.to_add}
                | {update.desired.key for update in diff.to_update}
                | {record.key for record in diff.to_delete})
     desired_by_key = {record.key: record for record in desired}
     actual_by_key = {record.key: record for record in actual}
-    for key in split_keys:
+    for key in keys:
         if key in pending:
             continue  # already drifting for another reason
         want, have = desired_by_key.get(key), actual_by_key.get(key)
         if want is not None and have is not None:
             diff.to_update.append(RecordUpdate(desired=want, actual=have))
+            pending.add(key)
 
 
 def plan_edge(edge: EdgeConfig, desired_all: list[CanonicalRecord], provider,
@@ -208,7 +215,9 @@ def plan_edge(edge: EdgeConfig, desired_all: list[CanonicalRecord], provider,
 
     split_keys = tuple(sorted(
         set(getattr(provider, "split_ttl_keys", ())) & set(edge.managed_keys)))
-    _force_split_ttl_updates(diff, split_keys, desired, actual)
+    proxied_keys = tuple(sorted(
+        set(getattr(provider, "proxied_keys", ())) & set(edge.managed_keys)))
+    _force_updates(diff, split_keys + proxied_keys, desired, actual)
 
     # Fail closed on empty truth. "Truth returned nothing" and "these records
     # should not exist" are indistinguishable in the diff, and only one of them
@@ -238,7 +247,7 @@ def plan_edge(edge: EdgeConfig, desired_all: list[CanonicalRecord], provider,
             "are unaffected and need no flag.")
 
     return EdgeResult(edge=edge, diff=diff, dropped_desired=tuple(dropped),
-                      split_ttl_keys=split_keys)
+                      split_ttl_keys=split_keys, proxied_keys=proxied_keys)
 
 
 def apply_edge(edge: EdgeConfig, desired_all: list[CanonicalRecord], provider,
@@ -251,8 +260,8 @@ def apply_edge(edge: EdgeConfig, desired_all: list[CanonicalRecord], provider,
     and only then, so the CLI can tell a refusal that provably wrote nothing
     from a failure that may have left the edge half-changed.
     """
-    guards = dict(truth_complete=truth_complete, allow_empty_truth=allow_empty_truth,
-                  allow_unverified_truth=allow_unverified_truth)
+    guards = {"truth_complete": truth_complete, "allow_empty_truth": allow_empty_truth,
+              "allow_unverified_truth": allow_unverified_truth}
     result = plan_edge(edge, desired_all, provider, **guards)
     if result.diff.is_converged:
         return result

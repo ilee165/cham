@@ -2,11 +2,24 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠️ HISTORICAL PLAN — DO NOT EXECUTE ITS SNIPPETS (status note, 2026-08-08
+> final review, DOC-B08).** Phase 4 was implemented through the SDD batch
+> workflow (`.superpowers/sdd/2026-07-31-phase-4-cloudflare-reconciler-v2/`
+> task briefs), not by walking this document's A/B checkboxes — which is why
+> ~35 A/B steps remain unchecked while the work they describe shipped, was
+> reviewed, and merged (PRs #5, #7, #8). Embedded code and Terraform snippets
+> are what was *planned*, not what *landed*: several conflict with the live
+> tree (NSG rule priorities, `allow_overwrite = false` now explicit on both
+> Cloudflare resources, saved-plan CI in place of bare `terraform apply`,
+> `requires-python >= 3.11` after the B2 review fix). The repository and its
+> merged history are the source of truth; treat every snippet here as
+> superseded unless it matches the tree.
+
 **Goal:** The public half of the split horizon live on Cloudflare, and a working reconciler that converges both edges (Azure Private DNS, Cloudflare) toward SpatiumDDI truth — never touching records outside its explicit managed set.
 
 **Architecture:** Three tracks. **Track A** (infra): apply `terraform/cloudflare` (separate state per ADR-004), point `www` at a public page, add the internal `www` override in SpatiumDDI, give the hub an internal-only web page — the split-horizon pair. **Track B** (code): repair the broken packaging, then implement config → providers (Spatium read-only truth, Azure edge, Cloudflare edge) → per-edge runner → CLI with a CI-grade exit-code contract, all TDD with zero-credential tests. **Track C** (integration): seed truth records in SpatiumDDI, converge live, prove tamper-healing and ownership safety, run the split-horizon demo. A committed desired-state snapshot (`desired-records.json`) is introduced so Phase 5's nightly CI can detect edge drift without reaching the laptop (new ADR-006).
 
-**Tech Stack:** Python ≥ 3.10 (uv + hatchling), `requests`, `azure-identity`, `azure-mgmt-privatedns`, `pytest` + `responses` (dev), Terraform cloudflare provider ~> 4.x, SpatiumDDI REST API (FastAPI), GitHub Pages (public www target).
+**Tech Stack:** Python ≥ 3.11 (uv + hatchling; the plan originally said 3.10, corrected by the B2 review — `tomllib` needs 3.11 and `pyproject.toml` requires it), `requests`, `azure-identity`, `azure-mgmt-privatedns`, `pytest` + `responses` (dev), Terraform cloudflare provider ~> 4.x, SpatiumDDI REST API (FastAPI), GitHub Pages (public www target).
 
 ## Global Constraints
 
@@ -1962,7 +1975,18 @@ So the split horizon is real and proven, but it belongs to the SpatiumDDI
 resolver rather than to `10.10.0.10`. Unifying the two resolvers is a design
 decision deferred to Phase 5, not something to patch blind here.
 
-- [x] **Step 1: Run the runbook split-horizon demo end to end**
+- [ ] **Step 1: Run the runbook split-horizon demo end to end** — **NOT
+  performed as written; criterion redefined (2026-08-08 final review,
+  DOC-B01).** The numbered steps below describe the laptop-over-tunnel path,
+  and no tunnel run occurred: cloud-init leaves WireGuard disabled pending an
+  operator key, and the hub's own resolver answers `www` publicly (ADR-007).
+  What WAS captured (`split-horizon.txt`) is the narrower local-resolver
+  proof — Cloudflare/Pages public half, SpatiumDDI-resolver internal half,
+  hub page fetched by IP — in which step 2's dig ran against the Spatium
+  agent on port 1053, not `@localhost`, and step 3's `curl --resolve`
+  bypasses DNS entirely (it proves the page, not the resolution path). The
+  tunnel-based demo transfers to Phase 5 behind the ADR-007 resolver
+  unification and the WireGuard operator step.
 
 1. Tunnel DOWN (`sudo wg-quick down wg0`): `curl -s https://www.dwsolution.co | head -1` → `PUBLIC — resolved via Cloudflare`.
 2. `sudo wg-quick up wg0`, then `dig +short @localhost www.dwsolution.co` → `10.10.0.10`.
@@ -2004,8 +2028,9 @@ git commit -m "docs: phase 4 complete — split-horizon live, reconciler converg
 5. Ownership safety: byte-identical before/after listings for the `db` seed and auto-registered records; `www`/`external-check` never surfaced in any diff.
 6. `terraform/cloudflare` applied from its own `cloudflare.tfstate` in the shared storage account, using only the scoped token.
 7. Split horizon demonstrable per runbook: `www.dwsolution.co` answers publicly (Cloudflare→Pages) and internally (BIND override→hub page), both captured in evidence.
+   **Status: redefined, not met as written (2026-08-08 final review).** Both answers are real and captured, but the internal one is served by the SpatiumDDI resolver only; the runbook's tunnel-up browser demo was not performed and cannot succeed until the ADR-007 resolver unification lands (Phase 5). The criterion as satisfied is: *split horizon proven at the SpatiumDDI resolver, with the serving resolver named in evidence.*
 8. `desired-records.json` committed, ADR-006 recorded, README Phase 4 checked.
 
 ## What Completion Looks Like
 
-`cham-reconcile --dry-run` is a one-command answer to "does the world match intent?" across two DNS providers, and `--apply` makes it so — provably unable to touch anything it doesn't own, from Terraform's seeds to Azure's auto-registered VM records. The test suite demonstrates the design story (a trivial loop, all the work in the adapters — each adapter's translation quirk pinned by an offline test). The public internet and the lab disagree about `www.dwsolution.co`, on purpose, with both answers under version control. And a committed snapshot of truth means Phase 5's nightly CI can spot edge tampering without any path back to the laptop.
+`cham-reconcile --dry-run` is a one-command answer to "does the world match intent?" across two DNS providers, and `--apply` makes it so — provably unable to touch anything it doesn't own, from Terraform's seeds to Azure's auto-registered VM records. The test suite demonstrates the design story (a trivial loop, all the work in the adapters — each adapter's translation quirk pinned by an offline test). The public internet and the lab disagree about `www.dwsolution.co`, on purpose — the public answer under version control here, the internal override rendered by the SpatiumDDI control plane (hand-created in A3; ADR-007). And a committed snapshot of truth means Phase 5's nightly CI can spot edge tampering without any path back to the laptop.

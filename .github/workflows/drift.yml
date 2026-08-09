@@ -56,13 +56,12 @@ jobs:
 
           echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
 
-          if [ "$exit_code" -eq 1 ]; then
-            echo "::error::cham-reconcile exited 1 (operational error: config/auth/network/convergence — not drift). See the log above."
-            exit 1
-          fi
-          # exit_code is 0 (converged) or 2 (drift found) here — both mean
-          # the tool ran to completion, so let the job continue to the
-          # drift-issue step, which branches on the captured code.
+          # WR-01: only 0 (converged) and 2 (drift found) mean the tool ran to
+          # completion; the gate script fails closed on 1 AND on every
+          # unexpected status (126/127/137/...), which the old inline check
+          # silently accepted. On 2 the job continues to the drift-issue step,
+          # which branches on the captured code.
+          bash "$GITHUB_WORKSPACE/scripts/check-drift-exit.sh" "$exit_code"
       - name: Open issue on drift
         if: steps.reconcile.outputs.exit_code == '2'
         uses: actions/github-script@v7

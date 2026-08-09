@@ -9,6 +9,23 @@ the run reports success. The drop is therefore paired with a write-side
 refusal: every dropped key is recorded in `blocked_keys`, and `apply()`
 refuses the whole diff — before issuing any call — if it touches one.
 
+That guard is computed at LIST time, so on its own it loses the list-to-write
+race (CR-03, 2026-08-08 review): a record auto-registered after fetch_actual()
+but before the write is invisible to `blocked_keys`, and an unconditional
+create_or_update replaces it while the post-apply re-fetch shows the requested
+value — success reported over silent data loss. Every write is therefore
+conditional at the API level, where the race cannot hide:
+
+* ADD    — `MatchConditions.IfMissing` (If-None-Match: *): create-only; a
+           record that arrived since the list answers 412 instead of dying.
+* UPDATE — the ETag captured for that key by this run's fetch, with
+           `IfNotModified` (If-Match): any interleaved mutation answers 412.
+* DELETE — same ETag + `IfNotModified`.
+
+A 412 is surfaced as a readable concurrency refusal telling the operator to
+re-run: the fresh run re-fetches, re-plans, and — if the key is now
+auto-registered — refuses it through `blocked_keys` as usual.
+
 `is_auto_registered` is `Optional[bool]` and read-only in the SDK, so anything
 that is not exactly `False` (attribute missing, `None`, a string) is unknown
 ownership and is blocked. Only an explicit `False` means "manual, safe to
@@ -29,6 +46,11 @@ Auth: DefaultAzureCredential (az login locally; OIDC-federated in CI).
 from __future__ import annotations
 
 import sys
+
+# azure-core only (a transitive dependency of every azure package here): the
+# heavyweight SDK/auth imports stay lazy in __init__, and this module itself is
+# imported lazily by cli._build_providers.
+from azure.core import MatchConditions
 
 from ddi_reconciler.model import (
     SUPPORTED_RECORD_TYPES,
@@ -52,6 +74,10 @@ class AzureProvider:
         self.unparseable_keys: dict[RecordKey, str] = {}
         # Zones fetch_actual() actually read in this run.
         self._fetched_zones: set[str] = set()
+        # key -> ETag captured by the most recent fetch that saw the record
+        # set. UPDATE and DELETE writes are conditional on it (CR-03); a key
+        # with no captured ETag is refused rather than written unconditionally.
+        self._etags: dict[RecordKey, str] = {}
         if client is None:
             from azure.identity import DefaultAzureCredential
             from azure.mgmt.privatedns import PrivateDnsManagementClient
@@ -100,6 +126,14 @@ class AzureProvider:
                 if getattr(rs, "is_auto_registered", None) is not False:
                     self.blocked_keys.add(key)
                     continue
+                # CR-03: the ETag this read observed, for conditional writes.
+                # Replaced on every fetch so a post-apply verification plans
+                # against fresh state, never a previous generation's tag.
+                etag = getattr(rs, "etag", None)
+                if isinstance(etag, str) and etag:
+                    self._etags[key] = etag
+                else:
+                    self._etags.pop(key, None)
                 try:
                     values = self._values(rtype, rs)
                 except (AttributeError, TypeError) as exc:
@@ -187,15 +221,48 @@ class AzureProvider:
                 "azure API error: refusing to write managed record set(s) that could not be "
                 f"read at the edge, so the diff for them is not trustworthy — {detail}")
 
+    def _require_etag(self, record: CanonicalRecord) -> str:
+        etag = self._etags.get(record.key)
+        if not etag:
+            raise RuntimeError(
+                f"azure API error: no ETag was captured for {'/'.join(record.key)} by this "
+                "run's read, so its write cannot be made conditional — and an "
+                "unconditional write is the list-to-write race CR-03 exists for. "
+                "Refusing the whole diff; re-run so fetch_actual() reads it again.")
+        return etag
+
     def apply(self, diff: Diff) -> None:
         self._guard([*diff.to_add, *(u.desired for u in diff.to_update), *diff.to_delete])
+        # Resolve every ETag before the first call, for the same reason
+        # _guard() vets every record first: all-or-nothing, or the writes
+        # ordered ahead of the refused one land anyway.
+        updates = [(u.desired, self._require_etag(u.desired)) for u in diff.to_update]
+        deletes = [(record, self._require_etag(record)) for record in diff.to_delete]
         try:
-            for record in diff.to_add + [u.desired for u in diff.to_update]:
+            for record in diff.to_add:
+                # Create-only: a record that appeared since the list (VM
+                # auto-registration winning the race) answers 412 rather than
+                # being replaced.
                 self._client.record_sets.create_or_update(
                     self.resource_group, record.zone, record.rtype, record.name,
-                    self._record_set_body(record))
-            for record in diff.to_delete:
+                    self._record_set_body(record),
+                    match_condition=MatchConditions.IfMissing)
+            for record, etag in updates:
+                self._client.record_sets.create_or_update(
+                    self.resource_group, record.zone, record.rtype, record.name,
+                    self._record_set_body(record),
+                    etag=etag, match_condition=MatchConditions.IfNotModified)
+            for record, etag in deletes:
                 self._client.record_sets.delete(
-                    self.resource_group, record.zone, record.rtype, record.name)
+                    self.resource_group, record.zone, record.rtype, record.name,
+                    etag=etag, match_condition=MatchConditions.IfNotModified)
         except Exception as exc:
+            if getattr(exc, "status_code", None) == 412:
+                raise RuntimeError(
+                    "azure API error applying diff: the edge changed between this run's "
+                    f"read and its write (HTTP 412 precondition failure: {exc}). Azure "
+                    "refused the failing write, so nothing at that key was overwritten; "
+                    "writes earlier in this diff have already landed. Re-run the "
+                    "reconciler: the fresh read will re-plan, and a key that Azure VM "
+                    "auto-registration now owns will be refused.") from exc
             raise RuntimeError(f"azure API error applying diff: {exc}") from exc

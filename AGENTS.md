@@ -12,7 +12,7 @@ This repository models a hybrid DNS/DDI lab. Under `terraform/`, reusable infras
 
 ## Build, Test, and Development Commands
 
-- `cd ddi-reconciler && uv sync --dev` installs Python 3.10+ dependencies from `uv.lock`.
+- `cd ddi-reconciler && uv sync --dev` installs Python 3.11+ dependencies from `uv.lock` (`pyproject.toml` requires ≥3.11 — `tomllib`).
 - `uv run pytest -q` runs the reconciler test suite.
 - `uv run ruff check .` checks Python style and import ordering.
 - `terraform fmt -recursive` formats every Terraform file; use `terraform fmt -check -recursive` before submitting.
