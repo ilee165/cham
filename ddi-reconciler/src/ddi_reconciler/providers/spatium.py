@@ -65,6 +65,7 @@ make and this adapter's to preserve.
 from __future__ import annotations
 
 import ipaddress
+import json
 import sys
 import urllib.parse
 
@@ -277,6 +278,14 @@ class SpatiumProvider:
         items: list = []
         declared_total: int | None = None
         previous_page: list | None = None
+        # Identity of every item this walk has returned (CR-01). The length
+        # check against the declared total counts *rows*, so a page overlap —
+        # A,B then B,C with total=4 — used to fill the count while a fourth
+        # record never arrived, and the walk was certified complete. Items are
+        # fingerprinted over their whole payload (live records carry unique
+        # ids, so two distinct records can never collide) and any repeat is an
+        # unstable pagination view: fatal, never counted.
+        seen_items: set[str] = set()
         whole_body_was_a_bare_list = False
         page_number = 0
         while url is not None:
@@ -302,10 +311,27 @@ class SpatiumProvider:
                     f"spatium API error on {path}: pagination did not advance — page "
                     f"{page_number} returned the same items as page {page_number - 1}")
             previous_page = page_items
+            for item in page_items:
+                fingerprint = json.dumps(item, sort_keys=True, default=repr)
+                if fingerprint in seen_items:
+                    raise RuntimeError(
+                        f"spatium API error on {path}: page {page_number} returned an item "
+                        "already seen in this walk. An overlapping or unstable pagination "
+                        "view can satisfy the declared total while a real record never "
+                        "arrives — and a record missing from certified truth reads as a "
+                        "delete order downstream. Refusing the read.")
+                seen_items.add(fingerprint)
             items.extend(page_items)
             total = _first_int(body, TOTAL_KEYS)
             if total is not None:
-                declared_total = total
+                if declared_total is None:
+                    declared_total = total
+                elif total != declared_total:
+                    raise RuntimeError(
+                        f"spatium API error on {path}: the declared total changed from "
+                        f"{declared_total} to {total} between pages — the collection is "
+                        "being modified under the walk, so no count can certify this "
+                        "read as complete")
             following = self._next_url(body, path, url, page_number, len(items),
                                        len(page_items), declared_total)
             if following == url:
@@ -341,6 +367,30 @@ class SpatiumProvider:
             raise RuntimeError(
                 f"spatium API error: {what} is missing required field {key!r} "
                 f"(field(s) present: {sorted(payload)})") from exc
+
+    @classmethod
+    def _string_field(cls, payload, key: str, what: str, *,
+                      required_nonempty: bool = True) -> str:
+        """A required payload field that must arrive as a string (CR-02).
+
+        str() coercion is exactly the bug this replaces: JSON null in
+        `record_type` became "None" -> "NONE" -> 'unsupported' -> silently
+        skipped, after the collection count had already certified the read
+        complete — so the dropped record's key read as a delete order at the
+        edge. A wrong-typed required field is a malformed payload, never
+        material to normalize.
+        """
+        value = cls._field(payload, key, what)
+        if not isinstance(value, str):
+            raise RuntimeError(
+                f"spatium API error: {what} field {key!r} is {type(value).__name__} "
+                f"({value!r}), expected a string. Coercing it would silently drop or "
+                "invent a truth record, so the read is refused.")
+        if required_nonempty and not value.strip():
+            raise RuntimeError(
+                f"spatium API error: {what} field {key!r} is empty, expected a "
+                "nonempty string")
+        return value
 
     @staticmethod
     def _segment(value, what: str) -> str:
@@ -380,7 +430,10 @@ class SpatiumProvider:
             group_id = self._segment(
                 self._field(group, "id", "dns group entry"), "dns group entry")
             for zone in self._read(ZONES_PATH.format(group_id=group_id)):
-                zone_name = canonical_name(str(self._field(zone, "name", "zone entry")))
+                # A wrong-typed zone name must not canonicalize into a name
+                # nobody asked for: the zone would be silently skipped and
+                # every record under it dropped from certified truth (CR-02).
+                zone_name = canonical_name(self._string_field(zone, "name", "zone entry"))
                 # Filter before descending: a zone nobody asked for costs a
                 # records round-trip and can contribute nothing.
                 if zone_name not in wanted:
@@ -390,13 +443,21 @@ class SpatiumProvider:
                 records_path = RECORDS_PATH.format(group_id=group_id, zone_id=zone_id)
                 for rec in self._read(records_path):
                     what = f"record in zone {zone_name!r}"
-                    rtype = str(self._field(rec, RECORD_TYPE_FIELD, what)).strip().upper()
+                    # Only a well-formed nonempty string may be judged
+                    # unsupported and skipped; anything else is malformed
+                    # payload and fails the read (CR-02).
+                    rtype = self._string_field(rec, RECORD_TYPE_FIELD, what).strip().upper()
                     if rtype not in SUPPORTED_RECORD_TYPES:
                         continue
-                    raw_name = str(self._field(rec, "name", what))
+                    raw_name = self._string_field(rec, "name", what,
+                                                  required_nonempty=False)
                     what = f"record {raw_name}/{rtype} in zone {zone_name!r}"
-                    value = self._field(rec, "value", what)
+                    value = self._string_field(rec, "value", what,
+                                               required_nonempty=False)
                     raw_ttl = rec.get("ttl")
+                    if isinstance(raw_ttl, bool):
+                        raise RuntimeError(
+                            f"spatium API error: {what} has a non-integer ttl {raw_ttl!r}")
                     try:
                         ttl = int(raw_ttl) if raw_ttl is not None else 300
                     except (TypeError, ValueError) as exc:
@@ -405,7 +466,7 @@ class SpatiumProvider:
                             f"{raw_ttl!r}") from exc
                     entry = grouped.setdefault((zone_name, self._relative(raw_name, zone_name),
                                                 rtype), {"values": [], "ttl": ttl})
-                    entry["values"].append(str(value))
+                    entry["values"].append(value)
 
         records: list[CanonicalRecord] = []
         for (zone_name, name, rtype), entry in grouped.items():
