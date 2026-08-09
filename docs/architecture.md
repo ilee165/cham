@@ -53,7 +53,15 @@ Every path was verified over both UDP and TCP.
 ## DNS zones
 | Zone | Authority | Managed by |
 |---|---|---|
-| dwsolution.co (public) | Cloudflare | Terraform infrastructure/seeds + reconciler-owned record set |
+| dwsolution.co (public) | Cloudflare | Terraform seeds (`www`, `external-check`) + reconciler allowlist (`demo`, `reconciler-check`) + **hand-managed Microsoft 365 production records** (MX, SPF/`MS=` TXT, autodiscover/sip/lyncdiscover, Intune CNAMEs, two SRV) that neither tool owns |
 | lab.dwsolution.co | Laptop BIND9 (SpatiumDDI) | SpatiumDDI |
-| azure.dwsolution.co | Azure Private DNS | Terraform seeds + reconciler |
-| www.dwsolution.co (internal view) | BIND9 override | SpatiumDDI |
+| azure.dwsolution.co | Azure Private DNS | Terraform seeds + reconciler allowlist + **Azure VM auto-registration** (`vm-*` records the platform writes; the reconciler blocks writes to any key it cannot prove manual) |
+| www.dwsolution.co (internal view) | BIND9 override | SpatiumDDI (override zone created by hand in Task A3 — in the control plane, not in this repo; ADR-007) |
+
+Ownership boundaries for the shared zones, and why they are three mechanisms
+rather than one: Terraform refuses collisions (`allow_overwrite = false`) and
+declares no zone resource; the reconciler's ADR-005 allowlist bounds every
+record it may write; and the reconciler's record-type filter keeps MX/SRV —
+including the production mail path — out of its model entirely. Azure
+auto-registered records are additionally write-blocked at the provider layer
+even when a managed key collides with one.

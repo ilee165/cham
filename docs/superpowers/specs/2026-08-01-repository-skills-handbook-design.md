@@ -103,7 +103,7 @@ Do not start a full graph build implicitly because semantic extraction may incur
 
 The handbook must preserve these facts:
 
-- The reconciler uses Python 3.10+, uv, pytest, and Ruff. Tests run offline without cloud credentials.
+- The reconciler uses Python 3.11+ (`pyproject.toml` `requires-python`), uv, pytest, and Ruff. Tests run offline without cloud credentials.
 - Terraform 1.9+ configurations have separate bootstrap, Azure lab, and Cloudflare state roots.
 - Azure DNS Private Resolver is cost-gated and cannot be enabled without approval.
 - A Terraform plan is a review artifact; validation does not authorize apply.

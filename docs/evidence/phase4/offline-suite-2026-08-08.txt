@@ -1,0 +1,28 @@
+Phase 4 exit criterion 1 — offline suite, zero credentials (raw capture)
+Captured 2026-08-08 during the final-review remediation (DOC-B09 noted the
+original closeout committed no raw run for this criterion).
+
+Command, with every credential pinned empty for the invocation:
+
+  $ SPATIUM_API_TOKEN= CLOUDFLARE_API_TOKEN= AZURE_SUBSCRIPTION_ID= \
+    AZURE_CLIENT_ID= AZURE_TENANT_ID= uv run pytest -q
+
+  ........................................................................ [ 20%]
+  ........................................................................ [ 41%]
+  ........................................................................ [ 62%]
+  ........................................................................ [ 83%]
+  ..........................................................               [100%]
+  346 passed in 2.61s
+
+Count note: the Phase 4 closeout suite was 305 tests; the 41 added here are
+the regression tests for the 2026-08-08 final-review findings (CR-01..04
+Spatium overlap/typed-fields, Azure ETag preconditions, Cloudflare proxy
+healing, and the WR-01 drift exit-code gate). The same run is enforced on
+every PR by .github/workflows/reconciler-tests.yml with the credential env
+vars pinned empty.
+
+Still not captured as raw evidence (requires live credentials, lab destroyed
+2026-08-08): a fresh `terraform state list` of cloudflare.tfstate and a
+Cloudflare token-scope listing. Exit criterion 6 rests on the committed A4
+apply notes in the Phase 4 plan and the reviewed workflow model, not on a raw
+capture.
