@@ -2,8 +2,11 @@ name: terraform-plan
 
 #checkov:skip=CKV_GHA_7:owner=repository-maintainer; exact=workflow_dispatch inputs; rationale=manual booleans select only the contents of a non-applying saved plan; control=the run is pinned to its Git commit and produces a manifest/hash, while apply independently verifies the current main commit, run identity, artifact, and environment approval.
 on:
+  # Unfiltered on purpose: the `static` job below is a required status check
+  # on main, and a required check that is filtered out of a PR never reports,
+  # so GitHub holds that PR at "Expected" indefinitely. The checks are
+  # credential-free and take about a minute.
   pull_request:
-    paths: ["terraform/**"]
   workflow_dispatch:
     inputs:
       stack:
