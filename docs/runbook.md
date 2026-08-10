@@ -27,11 +27,18 @@
   `lab/destroy/.../destroy-output.txt`). Approve the apply dispatch only
   after reading it. A bootstrap lifecycle policy expires plan blobs and
   their versions after 7 days.
-- Repository secrets/variables named by the workflow are configured. Neither a
+- Repository secrets/variables named by the workflows are configured
+  (Phase 5): the three OIDC identifiers, the four lab config secrets, the
+  two Cloudflare tokens, and the `BUDGET_START_DATE` variable. Neither a
   branch push nor a merge applies infrastructure; apply is a separate manual
-  exact-artifact dispatch. As of the Phase 2 post-review correction, these
-  secrets/variables are not yet configured; CI planning/apply remains a Phase 5
-  prerequisite and will fail closed in the meantime.
+  exact-artifact dispatch.
+- **Two Cloudflare tokens, two blast radii.** `CLOUDFLARE_API_TOKEN_RO`
+  (Zone:Read + DNS:Read) is a repository secret and is what the unattended
+  nightly drift job uses — a bug there can misreport but never mutate.
+  `CLOUDFLARE_API_TOKEN` (Zone:Read + DNS:Edit) lives **only** in the `lab`
+  environment, so it is reachable solely from a job a human has just
+  approved. Replacing the read-only token with the edit token "because it
+  also works" removes the boundary the drift workflow was reviewed for.
 
 ## Session start
 1. For Phase 3, use the pinned laptop runtime below. The repository's
@@ -145,6 +152,44 @@ Minimum VM sequence (unconditional):
 4. `az resource list -g rg-cham-lab -o table` → must be empty
    (public IPs and disks survive VM deletion)
 5. `az consumption budget list` sanity check if unsure
+
+## CI operations
+
+**Plan.** Actions → `terraform-plan` → Run workflow on `main`. Pick `stack`
+(`lab`, `cloudflare`, or `both`); the VM/NIC/resolver booleans apply to the
+lab stack only. Nothing plans on a pull request — PRs run the
+credential-free checks and nothing else. Note the run ID and the SHA-256
+from the run summary, then read the complete delta from private storage
+before approving anything (procedure under CI prerequisites above; the
+Cloudflare stack's review file is
+`cloudflare/apply/<commit>-<run_id>-<attempt>/cloudflare-plan-output.txt`).
+
+**Apply.** Actions → `terraform-apply-reviewed-plan` → Run workflow with the
+same `stack`, the `plan_run_id`, the `source_commit` (must still be current
+`main`), the approved `plan_sha256`, and `confirm=APPLY`. The run pauses at
+"Waiting for review" on environment `lab`; approve it there. The job applies
+that exact saved plan and nothing else — it never re-plans.
+
+**Drift.** `nightly-drift` runs at 06:00 UTC and on dispatch. It checks the
+public edge every time and the Azure edge whenever `rg-cham-lab` exists, all
+against the committed `desired-records.json` (ADR-006), on the read-only
+token. Converged runs are green and silent; drift is a green run plus an
+issue labelled `drift` carrying the diff. Heal with
+`uv run cham-reconcile --apply`, then close the issue. A run that fails
+loudly means exit 1 or an exit code outside the 0/2/1 contract — treat it as
+a broken tool, not as drift.
+
+**Kill switch, from anywhere including a phone.** Actions →
+`terraform-destroy`, `operation=plan` + `confirm=PLAN_DESTROY`, review the
+deletions, then the same workflow with `operation=apply`, the plan run
+ID/hash, and `confirm=DESTROY`.
+
+**Two staleness traps.** `HOME_IP` must be re-set when the ISP rotates the
+home address — the symptom is a CI apply that succeeds and locks you out of
+SSH and WireGuard, because the NSG now allows a stranger's address instead
+of yours. `BUDGET_START_DATE` must be bumped to the first of the current
+month if a fresh CI apply fails variable validation on the budget start
+date.
 
 ## Private Resolver experiment (deferred — not part of Phase 3)
 
