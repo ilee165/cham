@@ -72,6 +72,15 @@ resource "azurerm_storage_account" "state" {
     }
   }
 
+  # tflint azurerm_resources_missing_prevent_destroy: this account holds every
+  # Terraform state file in the project — the lab stack, the Cloudflare stack,
+  # and this bootstrap's own state. Losing it means losing the record of what
+  # exists in Azure and in a live production DNS zone. A destroy here is never
+  # routine, so it has to be a two-step act: remove this block in a reviewed
+  # commit first, then destroy.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "azurerm_storage_account_queue_properties" "state" {
@@ -91,6 +100,11 @@ resource "azurerm_storage_container" "state" {
   name                  = "tfstate"
   storage_account_id    = azurerm_storage_account.state.id
   container_access_type = "private"
+
+  # Same reasoning as the account above: this container IS the state store.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "azurerm_role_assignment" "state_blob_data_contributor" {
