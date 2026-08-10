@@ -435,3 +435,31 @@ def test_non_integer_ttl_is_skipped_not_a_traceback(capsys):
     assert provider.fetch_actual({Z}) == []
     assert (Z, "app", "A") in provider.unparseable_keys
     assert "app" in capsys.readouterr().err
+
+
+# --- NEW-WR-03: an existing-but-empty record set must leave a trace ---------
+
+def test_an_empty_record_set_is_recorded_not_silently_invisible(capsys):
+    """NEW-WR-03 (2026-08-10 review): a record set that exists with zero values
+    used to be skipped without a trace. A managed key in that state is
+    invisible to the diff, planned as an ADD, and the IfMissing create is
+    412-refused by the existing empty set on every run — a livelock whose
+    're-run the reconciler' advice can never help. Recording the key lets the
+    plan refuse with the true cause before any write."""
+    provider, _ = make_provider([record_set("ghost", "A")])
+    assert provider.fetch_actual({Z}) == []
+    assert (Z, "ghost", "A") in provider.unparseable_keys
+    assert "no values" in provider.unparseable_keys[(Z, "ghost", "A")]
+    assert "ghost" in capsys.readouterr().err
+
+
+def test_apply_refuses_a_managed_key_whose_record_set_is_empty():
+    """The livelock repro: desired wants app=10.10.4.30, the edge holds an
+    empty `app` record set. The apply must refuse up front with the real
+    cause, not ADD into a guaranteed 412."""
+    provider, client = make_provider([record_set("app", "A")])
+    provider.fetch_actual({Z})
+    add = CanonicalRecord(zone=Z, name="app", rtype="A", values=("10.10.4.30",))
+    with pytest.raises(RuntimeError, match="could not be read"):
+        provider.apply(Diff(to_add=[add]))
+    assert client.record_sets.upserts == []
