@@ -99,6 +99,38 @@ resource "azurerm_role_assignment" "state_blob_data_contributor" {
   principal_id         = var.principal_object_id
 }
 
+# Saved plans are review material with a short life (NEW-CR-01 / PR #11
+# review): the CI workflows write tfplan binaries and their complete review
+# output into a `tfplans` container the plan job creates on demand. Blob
+# versioning is enabled account-wide, so an overwrite or delete alone never
+# removes the bytes — this policy expires both current and versioned plan
+# blobs once the approval window (workflow_dispatch review, well under a
+# week) is over. The tfstate container is untouched: the rule matches the
+# tfplans prefix only.
+resource "azurerm_storage_management_policy" "state" {
+  storage_account_id = azurerm_storage_account.state.id
+
+  rule {
+    name    = "expire-saved-plans"
+    enabled = true
+
+    filters {
+      prefix_match = ["tfplans/"]
+      blob_types   = ["blockBlob"]
+    }
+
+    actions {
+      base_blob {
+        delete_after_days_since_creation_greater_than = 7
+      }
+
+      version {
+        delete_after_days_since_creation = 7
+      }
+    }
+  }
+}
+
 output "backend_config" {
   value = <<-EOT
     Create a gitignored backend.auto.tfbackend file for each remote-state root:

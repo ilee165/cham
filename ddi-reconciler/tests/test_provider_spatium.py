@@ -328,6 +328,55 @@ def test_a_total_that_changes_mid_walk_is_fatal():
         SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
 
 
+@responses.activate
+def test_truth_rows_disagreeing_on_ttl_are_fatal():
+    """NEW-IN-01 (2026-08-10 review): grouped.setdefault kept the FIRST row's
+    TTL for a multi-row RRset and silently ignored a later row's disagreeing
+    value, so the desired TTL depended on API row order. Desired state must
+    not be order-dependent: disagreement in the source of truth is a data
+    defect to fix in SpatiumDDI, not to resolve by iteration order."""
+    one_group_one_zone()
+    responses.get(RECORDS, json=page([rec("a", "10.0.0.1", ttl=300),
+                                      rec("a", "10.0.0.2", ttl=60)], total=2))
+    with pytest.raises(RuntimeError, match="disagree on ttl"):
+        SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+
+
+@responses.activate
+def test_a_non_integral_float_ttl_is_rejected_not_truncated():
+    """NEW-IN-02: int(300.9) silently stored 300 although the error message
+    claims non-integer TTLs are rejected. A fractional TTL is malformed truth."""
+    one_group_one_zone()
+    responses.get(RECORDS, json=page([rec("a", ttl=300.9)], total=1))
+    with pytest.raises(RuntimeError, match="non-integer ttl"):
+        SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+
+
+@responses.activate
+def test_an_integral_float_ttl_is_accepted_as_its_integer():
+    """JSON numbers may arrive as 300.0 — an integral float is well-formed."""
+    one_group_one_zone()
+    responses.get(RECORDS, json=page([rec("a", ttl=300.0)], total=1))
+    records = SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+    assert [r.ttl for r in records] == [300]
+
+
+@responses.activate
+def test_a_bare_list_page_after_an_envelope_page_is_fatal():
+    """NEW-WR-01 (2026-08-10 review): the CR-01 duplicate accounting runs only
+    on envelope pages. If page 1 is an envelope declaring a total and page 2
+    arrives as a bare list — a proxy that unwraps, an error page, a shape
+    change under load — its items used to bypass the fingerprint set, so the
+    same A,B / B,C overlap could fill the declared total while a real record
+    never arrived, and the walk was still certified complete."""
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a"), rec("b", "10.0.0.2")],
+                                 "total": 4, "page": 1, "page_size": 2})
+    responses.get(RECORDS, json=[rec("b", "10.0.0.2"), rec("c", "10.0.0.3")])
+    with pytest.raises(RuntimeError, match="bare JSON list after"):
+        SpatiumProvider(BASE, token="t").fetch_desired({"test.zone"})
+
+
 # --- CR-1: what "the read was complete" is allowed to mean ------------------
 
 @responses.activate

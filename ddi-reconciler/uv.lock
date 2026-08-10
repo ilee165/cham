@@ -316,6 +316,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
+    { name = "pyyaml" },
     { name = "responses" },
     { name = "ruff" },
 ]
@@ -330,6 +331,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "pytest" },
+    { name = "pyyaml", specifier = ">=6" },
     { name = "responses", specifier = ">=0.25" },
     { name = "ruff", specifier = ">=0.12" },
 ]

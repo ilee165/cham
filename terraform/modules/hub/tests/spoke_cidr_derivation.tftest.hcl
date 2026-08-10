@@ -70,3 +70,54 @@ run "derived_rules_follow_a_non_default_spoke_cidr" {
     error_message = "cloud-init still hard-codes 10.10.0.0/16 somewhere"
   }
 }
+
+# NEW-WR-02 (2026-08-10 review): address_space and every spoke entry feed the
+# public-IP hub's BIND ACLs, NSG allow rules, and NAT sources via
+# internal_cidrs, so a public or over-broad value must die at plan time —
+# not become an open recursive resolver (valid public CIDR) or a boot-time
+# named.conf/iptables failure (malformed string).
+
+run "public_spoke_cidr_is_rejected" {
+  command = plan
+
+  variables {
+    spoke_address_spaces = ["0.0.0.0/0"]
+  }
+
+  expect_failures = [var.spoke_address_spaces]
+}
+
+run "public_address_space_is_rejected" {
+  command = plan
+
+  variables {
+    address_space = "8.8.0.0/16"
+  }
+
+  expect_failures = [var.address_space]
+}
+
+# PR #11 review: Terraform's CIDR functions read leading-zero octets as
+# decimal (010.010.0.0/16 == 10.10.0.0/16 to the RFC1918 check), but the
+# original string renders into iptables, which reads them as octal
+# (8.8.0.0/16) — bypassing the security property the validation enforces.
+
+run "leading_zero_spoke_cidr_is_rejected" {
+  command = plan
+
+  variables {
+    spoke_address_spaces = ["010.010.4.0/24"]
+  }
+
+  expect_failures = [var.spoke_address_spaces]
+}
+
+run "leading_zero_address_space_is_rejected" {
+  command = plan
+
+  variables {
+    address_space = "010.010.0.0/16"
+  }
+
+  expect_failures = [var.address_space]
+}

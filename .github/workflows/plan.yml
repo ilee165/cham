@@ -142,7 +142,33 @@ jobs:
             -backend-config="storage_account_name=${{ steps.backend.outputs.name }}" \
             -backend-config="subscription_id=${ARM_SUBSCRIPTION_ID}" \
             -backend-config="tenant_id=${ARM_TENANT_ID}"
-          terraform plan -input=false -no-color -out=tfplan
+
+          # PR #11 review (P1): the human-readable delta names state-derived
+          # values (the home IP inside NSG rules, the hub public IP), and
+          # public-repository workflow logs are downloadable — so the complete
+          # output goes to a private review file beside the saved plan, never
+          # to stdout. Reviewers download it from the tfplans container and
+          # compare the full delta before approving the hash (see the
+          # runbook's saved-plan review procedure). The run attempt is part
+          # of the blob prefix so a re-run can never overwrite bytes an
+          # operator already reviewed.
+          blob_prefix="lab/apply/${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "blob_prefix=$blob_prefix" >> "$GITHUB_OUTPUT"
+          plan_exit=0
+          terraform plan -input=false -no-color -out=tfplan > plan-output.txt 2>&1 || plan_exit=$?
+          if [[ "$plan_exit" -ne 0 ]]; then
+            az storage container create --name tfplans \
+              --account-name "${{ steps.backend.outputs.name }}" \
+              --auth-mode login --output none || true
+            az storage blob upload \
+              --account-name "${{ steps.backend.outputs.name }}" \
+              --container-name tfplans \
+              --name "${blob_prefix}/plan-output.txt" \
+              --file plan-output.txt --auth-mode login --overwrite false --output none \
+              || echo "::warning::The failed plan's output could not be stored privately."
+            echo "::error::terraform plan exited ${plan_exit}. The complete output is private at tfplans/${blob_prefix}/plan-output.txt (az storage blob download — see the runbook); it is not printed here because plan output on a public repository discloses state-derived values."
+            exit "$plan_exit"
+          fi
 
           plan_sha256="$(sha256sum tfplan | awk '{print $1}')"
           echo "sha256=$plan_sha256" >> "$GITHUB_OUTPUT"
@@ -153,7 +179,8 @@ jobs:
             --arg commit_sha "$GITHUB_SHA" \
             --arg workflow_run_id "$GITHUB_RUN_ID" \
             --arg plan_sha256 "$plan_sha256" \
-            '{kind: $kind, repository: $repository, commit_sha: $commit_sha, workflow_run_id: $workflow_run_id, plan_sha256: $plan_sha256}' \
+            --arg plan_blob "${blob_prefix}/tfplan" \
+            '{kind: $kind, repository: $repository, commit_sha: $commit_sha, workflow_run_id: $workflow_run_id, plan_sha256: $plan_sha256, plan_blob: $plan_blob}' \
             > plan-manifest.json
 
           terraform show -json tfplan \
@@ -172,12 +199,41 @@ jobs:
           } > plan-summary.txt
           cat plan-summary.txt >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload immutable saved-plan artifact
+      # NEW-CR-01 (2026-08-10 review): the raw plan binary embeds every input
+      # variable value (including the HOME_IP secret), the full prior state
+      # snapshot, and the backend configuration. On a public repository any
+      # authenticated GitHub user can download workflow artifacts, so the plan
+      # and its complete review output go to the private state account instead
+      # — the same account both this job and the apply job already reach via
+      # OIDC — and the artifact below carries only the sanitized manifest and
+      # summary. The blob prefix encodes commit, run ID, and run attempt; the
+      # manifest binds it, apply verifies it against the run identity, and
+      # --overwrite false makes every reviewed plan attempt immutable.
+      - name: Store saved plan and its review output in the private state account
+        run: |
+          set -euo pipefail
+          az storage container create \
+            --name tfplans \
+            --account-name "${{ steps.backend.outputs.name }}" \
+            --auth-mode login \
+            --output none
+          for file in tfplan plan-output.txt; do
+            az storage blob upload \
+              --account-name "${{ steps.backend.outputs.name }}" \
+              --container-name tfplans \
+              --name "${{ steps.plan.outputs.blob_prefix }}/${file}" \
+              --file "$file" \
+              --auth-mode login \
+              --overwrite false \
+              --output none
+          done
+          rm -f tfplan plan-output.txt
+
+      - name: Upload sanitized plan-manifest artifact
         uses: actions/upload-artifact@v4
         with:
           name: terraform-plan-${{ github.sha }}
           path: |
-            terraform/envs/lab/tfplan
             terraform/envs/lab/plan-manifest.json
             terraform/envs/lab/plan-summary.txt
           if-no-files-found: error

@@ -7,6 +7,26 @@
   protection is absent and independently verify the planned main commit.
 - The OIDC principal has Contributor at subscription scope and Storage Blob
   Data Contributor on the state storage account; shared keys are disabled.
+- Saved plan binaries and their complete human-readable output never ship
+  as workflow artifacts **or appear in workflow logs**: on a public
+  repository any authenticated GitHub user can download both, and a plan
+  embeds secret variable values (the home IP inside NSG rules), the full
+  state snapshot, and the backend configuration (NEW-CR-01 + PR #11
+  review). Each plan run stores `tfplan` and `plan-output.txt` (the
+  complete delta) at
+  `tfplans/lab/<apply|destroy>/<commit>-<run_id>-<run_attempt>/` in the
+  private state storage account, written with `--overwrite false` so a
+  reviewed attempt is immutable; the manifest binds the blob path and the
+  artifact carries only the sanitized manifest and summary.
+- **Reviewing a CI plan before approving its hash:** download the private
+  review file and read the complete delta — the public run summary shows
+  only actions, addresses, and the SHA-256:
+  `az storage blob download --account-name <state account> --container-name
+  tfplans --name "lab/apply/<commit>-<run_id>-<attempt>/plan-output.txt"
+  --file plan-output.txt --auth-mode login` (destroy runs use
+  `lab/destroy/.../destroy-output.txt`). Approve the apply dispatch only
+  after reading it. A bootstrap lifecycle policy expires plan blobs and
+  their versions after 7 days.
 - Repository secrets/variables named by the workflow are configured. Neither a
   branch push nor a merge applies infrastructure; apply is a separate manual
   exact-artifact dispatch. As of the Phase 2 post-review correction, these
@@ -24,7 +44,9 @@
    `true`); keep the resolver `false`.
 3. Generate a saved plan and review its complete delta and SHA-256. Locally,
    use `terraform plan -out=tfplan`; in CI, manually dispatch `plan.yml` on the
-   current `main` commit. A merge never applies infrastructure.
+   current `main` commit — the complete delta is in the private
+   `plan-output.txt` blob (see "Reviewing a CI plan" above), not in the
+   public run log. A merge never applies infrastructure.
 4. After explicit hash approval, apply that exact local plan file or manually
    dispatch `apply.yml` with the plan run ID, source commit, approved SHA-256,
    and `confirm=APPLY`. The `lab` environment must have required reviewers.

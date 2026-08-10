@@ -1,6 +1,7 @@
 output "hub_public_ip" {
-  description = "WireGuard endpoint — point the laptop peer here"
+  description = "WireGuard endpoint — point the laptop peer here. Sensitive so CI apply logs on the public repository do not print it (NEW-IN-03; the runbook rule keeps this IP out of committed evidence, and Actions secret-masking never covers computed values). Read it locally with `terraform output -raw hub_public_ip`."
   value       = module.hub.vm_public_ip
+  sensitive   = true
 }
 
 output "hub_private_ip" {

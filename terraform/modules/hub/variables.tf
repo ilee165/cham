@@ -33,8 +33,32 @@ variable "disk_controller_type" {
 variable "resource_group_name" { type = string }
 
 variable "address_space" {
-  type    = string
-  default = "10.10.0.0/22"
+  description = "Hub VNet CIDR. NEW-WR-02: feeds local.internal_cidrs, so it renders into the public-IP hub's BIND ACLs, NSG allow rules, and NAT sources — validated like onprem_address_space."
+  type        = string
+  default     = "10.10.0.0/22"
+
+  # PR #11 review: octets must be canonical (no leading zeros). Terraform's
+  # CIDR functions read 010.010.0.0/16 as decimal 10.10.0.0/16, but the
+  # ORIGINAL string is what renders into BIND and iptables — where iptables
+  # reads the octets as octal (8.8.0.0/16), silently changing what the
+  # RFC1918 check below believed it approved. Same pattern on every
+  # IP/CIDR variable in this module and the spoke module.
+  validation {
+    condition = (
+      can(cidrhost(var.address_space, 0)) &&
+      can(regex("^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(3[0-2]|[12]?[0-9])$", var.address_space))
+    )
+    error_message = "address_space must be an IPv4 CIDR in canonical octets (no leading zeros) like 10.10.0.0/22 — it renders into named.conf ACLs, NSG rules, and the NAT script, where non-canonical octets are re-interpreted (iptables reads them as octal)."
+  }
+
+  validation {
+    condition = anytrue([
+      for block in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] :
+      tonumber(split("/", var.address_space)[1]) >= tonumber(split("/", block)[1]) &&
+      try(cidrsubnet(format("%s/%s", split("/", var.address_space)[0], split("/", block)[1]), 0, 0) == block, false)
+    ]) && tonumber(split("/", var.address_space)[1]) <= 29
+    error_message = "address_space must be an RFC1918 subnet no smaller than /29 — it feeds the public-IP hub's BIND allow-query/allow-recursion, NSG allow rules, and NAT masquerade sources, so a public or over-broad range would expose an open recursive resolver."
+  }
 }
 
 variable "vpn_subnet_cidr" {
@@ -55,20 +79,21 @@ variable "hub_vm_ip" {
   validation {
     condition = (
       can(cidrhost("${var.hub_vm_ip}/32", 0)) &&
-      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$", var.hub_vm_ip))
+      can(regex("^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$", var.hub_vm_ip))
     )
     error_message = "hub_vm_ip must be a single IPv4 address without a mask, e.g. 10.10.0.10."
   }
 }
 
 variable "home_ip" {
-  description = "Your home public IP as /32. NEVER widen. Not committed — set in tfvars (gitignored) or TF_VAR env."
+  description = "Your home public IP as /32. NEVER widen. Not committed — set in tfvars (gitignored) or TF_VAR env. Sensitive so plan output redacts the NSG rules that carry it."
   type        = string
+  sensitive   = true
 
   validation {
     condition = (
       can(cidrhost(var.home_ip, 0)) &&
-      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/32$", var.home_ip))
+      can(regex("^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/32$", var.home_ip))
     )
     error_message = "home_ip must be one valid IPv4 host expressed as a /32."
   }
@@ -88,7 +113,7 @@ variable "onprem_address_space" {
   validation {
     condition = (
       can(cidrhost(var.onprem_address_space, 0)) &&
-      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.onprem_address_space))
+      can(regex("^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(3[0-2]|[12]?[0-9])$", var.onprem_address_space))
     )
     error_message = "onprem_address_space must be an IPv4 CIDR like 10.20.0.0/16 — it renders into named.conf ACLs, WireGuard AllowedIPs, and NSG rules."
   }
@@ -104,8 +129,29 @@ variable "onprem_address_space" {
 }
 
 variable "spoke_address_spaces" {
-  description = "Spoke CIDRs permitted to transit the hub NVA toward Internet and on-premises destinations."
+  description = "Spoke CIDRs permitted to transit the hub NVA toward Internet and on-premises destinations. NEW-WR-02: each entry also feeds local.internal_cidrs and therefore the BIND ACLs, NSG allows, and NAT sources."
   type        = list(string)
+
+  validation {
+    condition = alltrue([
+      for cidr in var.spoke_address_spaces :
+      can(cidrhost(cidr, 0)) &&
+      can(regex("^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(3[0-2]|[12]?[0-9])$", cidr))
+    ])
+    error_message = "every spoke_address_spaces entry must be an IPv4 CIDR in canonical octets (no leading zeros) like 10.10.4.0/24 — each renders into named.conf ACLs, NSG rules, and the NAT script, where iptables reads non-canonical octets as octal."
+  }
+
+  validation {
+    condition = alltrue([
+      for cidr in var.spoke_address_spaces :
+      anytrue([
+        for block in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] :
+        tonumber(split("/", cidr)[1]) >= tonumber(split("/", block)[1]) &&
+        try(cidrsubnet(format("%s/%s", split("/", cidr)[0], split("/", block)[1]), 0, 0) == block, false)
+      ]) && tonumber(split("/", cidr)[1]) <= 30
+    ])
+    error_message = "every spoke_address_spaces entry must be an RFC1918 subnet no smaller than /30 — each feeds the public-IP hub's BIND ACLs, NSG allow rules, and NAT sources, so a public or over-broad entry (e.g. 0.0.0.0/0) would silently expose an open recursive resolver."
+  }
 }
 
 variable "wg_transfer_cidr" {
@@ -116,7 +162,7 @@ variable "wg_transfer_cidr" {
   validation {
     condition = (
       can(cidrhost(var.wg_transfer_cidr, 0)) &&
-      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.wg_transfer_cidr))
+      can(regex("^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(3[0-2]|[12]?[0-9])$", var.wg_transfer_cidr))
     )
     error_message = "wg_transfer_cidr must be an IPv4 CIDR like 172.16.0.0/24 — cidrhost() derives the WireGuard interface address from it and it renders into named.conf ACLs and NSG rules."
   }
@@ -144,7 +190,7 @@ variable "resolver_inbound_subnet_cidr" {
   validation {
     condition = (
       can(cidrhost(var.resolver_inbound_subnet_cidr, 0)) &&
-      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.resolver_inbound_subnet_cidr))
+      can(regex("^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(3[0-2]|[12]?[0-9])$", var.resolver_inbound_subnet_cidr))
     )
     error_message = "resolver_inbound_subnet_cidr must be a valid IPv4 CIDR such as 10.10.2.0/28."
   }
@@ -162,7 +208,7 @@ variable "onprem_dns_ip" {
   validation {
     condition = (
       can(cidrhost("${var.onprem_dns_ip}/32", 0)) &&
-      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$", var.onprem_dns_ip))
+      can(regex("^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$", var.onprem_dns_ip))
     )
     error_message = "onprem_dns_ip must be a single IPv4 address without a mask — it renders into the named.conf forwarders clause and WireGuard AllowedIPs."
   }

@@ -296,10 +296,19 @@ class SpatiumProvider:
                     f"{_MAX_PAGES} pages")
             body = self._request(url, path)
             if isinstance(body, list):  # bare list: no envelope, no paging
+                # NEW-WR-01 (2026-08-10 review): only page 1 may be a bare
+                # list. A list arriving mid-walk would bypass the fingerprint
+                # accounting below, so the same A,B / B,C overlap CR-01 makes
+                # fatal could fill the declared total unseen — and a record
+                # missing from certified truth reads as a delete order.
+                if page_number > 1:
+                    raise RuntimeError(
+                        f"spatium API error on {path}: page {page_number} arrived as a "
+                        "bare JSON list after page 1 was a paging envelope. A mid-walk "
+                        "body-shape change bypasses the duplicate accounting that "
+                        "certifies the read as complete. Refusing the read.")
                 items.extend(body)
-                # Only a body that *is* the list — not a bare list arriving
-                # partway through a paginated walk — is self-evidently whole.
-                whole_body_was_a_bare_list = page_number == 1
+                whole_body_was_a_bare_list = True
                 break
             if not isinstance(body, dict):
                 raise RuntimeError(
@@ -455,7 +464,12 @@ class SpatiumProvider:
                     value = self._string_field(rec, "value", what,
                                                required_nonempty=False)
                     raw_ttl = rec.get("ttl")
-                    if isinstance(raw_ttl, bool):
+                    # NEW-IN-02: int() would truncate 300.9 to 300, though the
+                    # message below promises non-integer TTLs are rejected. An
+                    # integral float (300.0 — a legal JSON number shape) is
+                    # accepted as its integer.
+                    if isinstance(raw_ttl, bool) or (
+                            isinstance(raw_ttl, float) and not raw_ttl.is_integer()):
                         raise RuntimeError(
                             f"spatium API error: {what} has a non-integer ttl {raw_ttl!r}")
                     try:
@@ -466,6 +480,15 @@ class SpatiumProvider:
                             f"{raw_ttl!r}") from exc
                     entry = grouped.setdefault((zone_name, self._relative(raw_name, zone_name),
                                                 rtype), {"values": [], "ttl": ttl})
+                    # NEW-IN-01: setdefault keeps the first row's TTL, so a
+                    # later row's disagreement would be resolved by API row
+                    # order — desired state must never be order-dependent.
+                    # Disagreement is a truth-side data defect: name it, stop.
+                    if entry["ttl"] != ttl:
+                        raise RuntimeError(
+                            f"spatium API error: truth rows for {what} disagree on ttl "
+                            f"({entry['ttl']} vs {ttl}). The desired TTL would depend on "
+                            "API row order; fix the RRset's rows in SpatiumDDI.")
                     entry["values"].append(value)
 
         records: list[CanonicalRecord] = []

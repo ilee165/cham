@@ -72,10 +72,43 @@ variable "hub_nva_ip" {
   type        = string
 }
 
+variable "spoke_address_spaces" {
+  description = "All spoke CIDRs in the lab, including this spoke's own. DenyOtherSpokes blocks them ahead of Azure's default AllowVnetInBound (NEW-IN-04 — was a hardcoded 10.10.0.0/16 that missed spokes outside the default supernet); this spoke's own traffic is admitted earlier by AllowIntraSpoke."
+  type        = list(string)
+
+  validation {
+    condition = alltrue([
+      for cidr in var.spoke_address_spaces :
+      can(cidrhost(cidr, 0)) &&
+      can(regex("^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(3[0-2]|[12]?[0-9])$", cidr))
+    ])
+    error_message = "every spoke_address_spaces entry must be an IPv4 CIDR in canonical octets (no leading zeros) like 10.10.4.0/24 — the list renders directly into this spoke's NSG deny rule."
+  }
+
+  # PR #11 review: alltrue([]) is true, and an NSG rule whose
+  # source_address_prefixes is empty passes plan but fails at ARM apply.
+  validation {
+    condition     = length(var.spoke_address_spaces) > 0
+    error_message = "spoke_address_spaces must not be empty — DenyOtherSpokes renders it as source_address_prefixes, and ARM rejects an NSG rule with no source."
+  }
+
+  validation {
+    condition     = contains(var.spoke_address_spaces, var.address_space)
+    error_message = "spoke_address_spaces must include this spoke's own address_space — the list is the complete set of lab spoke CIDRs (own-spoke traffic is admitted earlier by AllowIntraSpoke, so including it here is safe and required)."
+  }
+}
+
 variable "onprem_address_space" {
   description = "On-prem CIDR reachable via the tunnel"
   type        = string
   default     = "10.20.0.0/16"
+
+  # PR #11 review: canonical octets only — Terraform reads 010.x as decimal
+  # while downstream consumers can re-interpret the original string as octal.
+  validation {
+    condition     = can(regex("^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(3[0-2]|[12]?[0-9])$", var.onprem_address_space))
+    error_message = "onprem_address_space must be an IPv4 CIDR in canonical octets (no leading zeros)."
+  }
 
   validation {
     condition = anytrue([
@@ -91,6 +124,11 @@ variable "wg_transfer_cidr" {
   description = "WireGuard transfer network allowed to reach spoke workloads."
   type        = string
   default     = "172.16.0.0/24"
+
+  validation {
+    condition     = can(regex("^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(3[0-2]|[12]?[0-9])$", var.wg_transfer_cidr))
+    error_message = "wg_transfer_cidr must be an IPv4 CIDR in canonical octets (no leading zeros)."
+  }
 
   validation {
     condition = anytrue([

@@ -150,7 +150,10 @@ class BlockingProvider(FakeProvider):
     def __init__(self, actual, blocked_keys=(), unparseable_keys=()):
         super().__init__(actual)
         self.blocked_keys = set(blocked_keys)
-        self.unparseable_keys = set(unparseable_keys)
+        # AzureProvider's real attribute is a key -> reason dict; some tests
+        # pass a bare set to model a provider that records no reasons.
+        self.unparseable_keys = (unparseable_keys if isinstance(unparseable_keys, dict)
+                                 else set(unparseable_keys))
 
 
 @pytest.mark.parametrize("attr", ["blocked_keys", "unparseable_keys"])
@@ -172,6 +175,32 @@ def test_unwritable_keys_outside_the_managed_set_are_ignored():
 def test_providers_without_the_attributes_are_unaffected():
     """The hook is duck-typed: Cloudflare exposes neither set."""
     assert plan_edge(EDGE, [rec("app", "10.10.4.30")], FakeProvider([])).diff.to_add
+
+
+def test_plan_edge_surfaces_the_recorded_unparseable_reason():
+    """PR #11 review: the provider records WHY a key is unwritable ('record set
+    exists but carries no values...'), but plan_edge used to flatten every cause
+    into rename-the-VM advice. The stored reason must reach the operator, and
+    the auto-registration advice must not be attached to a key it cannot fix."""
+    provider = BlockingProvider([], unparseable_keys={
+        (Z, "app", "A"): "record set exists but carries no values"})
+    with pytest.raises(UnwritableKeyError) as excinfo:
+        plan_edge(EDGE, [rec("app", "10.10.4.30")], provider)
+    message = str(excinfo.value)
+    assert "carries no values" in message
+    assert "rename the VM" not in message
+
+
+def test_plan_edge_reports_blocked_and_unparseable_causes_separately():
+    provider = BlockingProvider([], blocked_keys={(Z, "db", "A")},
+                                unparseable_keys={(Z, "app", "A"): "empty record set"})
+    edge = EdgeConfig(name=EDGE.name, provider=EDGE.provider, zone=EDGE.zone,
+                      managed_keys=frozenset({(Z, "app", "A"), (Z, "db", "A")}))
+    with pytest.raises(UnwritableKeyError) as excinfo:
+        plan_edge(edge, [rec("app", "10.10.4.30"), rec("db", "10.10.4.31")], provider)
+    message = str(excinfo.value)
+    assert "auto-registration" in message and "rename the VM" in message
+    assert "empty record set" in message
 
 
 # --- CR-1: PARTIAL truth is not a delete order either -----------------------

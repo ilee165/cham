@@ -141,6 +141,18 @@ class AzureProvider:
                         f"azure API error listing {zone}: record set {name}/{rtype} has an "
                         f"unreadable value ({exc})") from exc
                 if not values:
+                    # NEW-WR-03 (2026-08-10 review): an existing-but-empty
+                    # record set is invisible to the diff, so a managed key
+                    # here would plan as an ADD whose IfMissing create the
+                    # (empty) set 412-refuses on every run — a livelock the
+                    # 412 message's "re-run" advice can never break. Record
+                    # it so the plan refuses with the true cause up front.
+                    self.unparseable_keys[key] = (
+                        "record set exists but carries no values; the diff cannot "
+                        "represent it — delete the empty record set out of band or "
+                        "give it values")
+                    print(f"warning: [azure] skipping empty record set "
+                          f"{'/'.join(key)}", file=sys.stderr)
                     continue
                 try:
                     records.append(CanonicalRecord(
