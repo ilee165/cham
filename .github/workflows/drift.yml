@@ -4,20 +4,17 @@ on:
     - cron: "0 6 * * *"   # 06:00 UTC nightly
   workflow_dispatch:
 
-# This job deliberately checks only the PUBLIC edge, which is why it needs no
-# Azure credentials and no id-token permission. The azure-private edge lives in
-# rg-cham-lab, which is destroyed between sessions for cost control, so
-# including it would make a scheduled run fail every night on a resource group
-# that is absent by design — and a nightly job that is always red tells you
-# nothing. That edge is checked by hand during a live session instead.
-#
-# To check both edges (only meaningful while the lab is up): drop the --edge
-# flag below, restore an azure/login@v2 step with client-id/tenant-id/
-# subscription-id, add `id-token: write` here, and export AZURE_SUBSCRIPTION_ID
-# to the step — the CLI reads it explicitly and azure/login does not set it.
+# The public edge is checked on every run; the azure-private edge is checked
+# only when it exists. rg-cham-lab is destroyed between sessions for cost
+# control, so an unconditional two-edge run would fail every night against a
+# resource group that is absent by design — and a nightly job that is always
+# red detects nothing. The gate below asks Azure whether the lab is up and
+# builds the --edge list from the answer, so the same workflow is correct in
+# both states and needs no edit when the lab comes and goes.
 permissions:
   contents: read
   issues: write
+  id-token: write
 
 jobs:
   drift:
@@ -27,6 +24,33 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # Read-only for this job's purposes: the reconciler runs --dry-run, and
+      # the only az call is the existence check below. The OIDC subject for a
+      # scheduled or dispatched run on the default branch is
+      # repo:<owner>/<repo>:ref:refs/heads/main.
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Is the lab up?
+        id: lab
+        run: |
+          set -euo pipefail
+          lab_up="$(az group exists --name rg-cham-lab --output tsv)"
+          # Anything other than a clean true/false means the question was not
+          # actually answered (auth failure, throttling, a changed output
+          # shape). Guessing "false" there would silently downgrade the run to
+          # public-only and report a converged night that was never checked.
+          case "$lab_up" in
+            true|false) ;;
+            *) echo "::error::az group exists returned '${lab_up}' — cannot determine whether the lab is up."; exit 1 ;;
+          esac
+          echo "lab_up=$lab_up" >> "$GITHUB_OUTPUT"
+
       - name: Run reconciler dry-run
         id: reconcile
         working-directory: ddi-reconciler
@@ -37,8 +61,21 @@ jobs:
           # a bug here can misreport, but never destroy. DNS:Edit stays in the
           # lab environment, behind that gate, for jobs a human triggered.
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_RO }}
+          # The Azure provider reads this explicitly; azure/login does not set
+          # it. Credentials themselves come from the login session that
+          # DefaultAzureCredential picks up.
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          LAB_UP: ${{ steps.lab.outputs.lab_up }}
         run: |
           pip install -q uv
+
+          edges=(--edge cloudflare-public)
+          if [[ "$LAB_UP" == "true" ]]; then
+            edges+=(--edge azure-private)
+          else
+            echo "rg-cham-lab is absent — checked the public edge only." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
 
           # cham-reconcile's exit-code contract (see ddi_reconciler/cli.py):
           #   0 converged, 1 operational error, 2 drift found (dry-run only).
@@ -48,7 +85,7 @@ jobs:
           # command, and read PIPESTATUS[0] rather than $? so tee's own
           # always-zero exit can never mask cham-reconcile's real one.
           set +e
-          uv run cham-reconcile --dry-run --edge cloudflare-public \
+          uv run cham-reconcile --dry-run "${edges[@]}" \
             --desired-from-file desired-records.json \
             | tee "$GITHUB_WORKSPACE/drift.txt"
           exit_code="${PIPESTATUS[0]}"

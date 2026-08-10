@@ -72,7 +72,19 @@ interview material as much as documentation.
   control, so an unattended two-edge run would fail every night on a resource
   group that is absent by design — and a permanently red job detects nothing.
   The Azure edge is checked by hand during live sessions; extending the
-  schedule to gate on lab presence is Phase 5 work. The operational
+  schedule to gate on lab presence is Phase 5 work.
+- **Amended 2026-08-10 (Phase 5 — presence-gated, not excluded):** the
+  scheduled run now asks Azure whether `rg-cham-lab` exists and builds its
+  `--edge` list from the answer: `cloudflare-public` always,
+  `azure-private` only when the lab is up. The workflow is therefore correct
+  in both states with no edit when the lab comes and goes, and the "between
+  sessions the Azure edge is unmonitored" tradeoff below now reads as
+  "unmonitored only while it does not exist". An indeterminate answer from
+  `az group exists` is a hard failure rather than an assumed `false`, so a
+  broken credential can never masquerade as a converged public-only night.
+  The read-only Cloudflare token is unchanged — the unattended job still
+  cannot mutate DNS.
+- The operational
   procedure — export at session end, snapshot diff review, drift-issue
   healing — lives in the runbook's "Reconciler snapshot + drift operations"
   section. CI additionally rejects a committed snapshot whose
