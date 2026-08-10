@@ -4,6 +4,12 @@ name: terraform-apply-reviewed-plan
 on:
   workflow_dispatch:
     inputs:
+      stack:
+        description: Which stack this reviewed plan belongs to
+        required: true
+        type: choice
+        default: lab
+        options: [lab, cloudflare]
       plan_run_id:
         description: Successful terraform-plan workflow run ID from main
         required: true
@@ -35,7 +41,7 @@ env:
 
 jobs:
   apply:
-    if: inputs.confirm == 'APPLY'
+    if: inputs.confirm == 'APPLY' && inputs.stack == 'lab'
     runs-on: ubuntu-latest
     environment: lab
     defaults:
@@ -187,3 +193,159 @@ jobs:
             -backend-config="subscription_id=${ARM_SUBSCRIPTION_ID}" \
             -backend-config="tenant_id=${ARM_TENANT_ID}"
           terraform apply -input=false tfplan
+
+  # Identical trust chain for the public-DNS stack. It writes into a zone that
+  # carries live Microsoft 365 mail records, so it earns the same treatment the
+  # lab stack gets — never a fresh plan, never -auto-approve, never a bare
+  # init, and the edit-capable Cloudflare token only ever inside the
+  # environment gate a human has just approved.
+  apply-cloudflare:
+    if: inputs.confirm == 'APPLY' && inputs.stack == 'cloudflare'
+    runs-on: ubuntu-latest
+    environment: lab
+    defaults:
+      run:
+        shell: bash
+        working-directory: terraform/cloudflare
+
+    steps:
+      - name: Require configured environment reviewers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: .
+        run: |
+          set -euo pipefail
+          reviewer_rules="$(gh api \
+            "repos/$GITHUB_REPOSITORY/environments/lab" \
+            --jq '[.protection_rules[] | select(.type == "required_reviewers")] | length')"
+          if [[ "$reviewer_rules" -lt 1 ]]; then
+            echo "::error::The lab environment has no required-reviewer protection rule. Nothing was applied."
+            exit 1
+          fi
+
+      - name: Validate approval inputs
+        working-directory: .
+        env:
+          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          APPROVED_SHA256: ${{ inputs.plan_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$PLAN_RUN_ID" =~ ^[0-9]+$ ]] || { echo "::error::plan_run_id must be numeric."; exit 1; }
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::source_commit must be a full lowercase commit SHA."; exit 1; }
+          [[ "$APPROVED_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::plan_sha256 must be a lowercase SHA-256."; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+
+      - name: Verify current main and source workflow run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        working-directory: .
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          current_main="$(git rev-parse origin/main)"
+          [[ "$current_main" == "$SOURCE_COMMIT" ]] || {
+            echo "::error::main moved after planning. Generate and approve a new saved plan."
+            exit 1
+          }
+
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PLAN_RUN_ID")"
+          [[ "$(jq -r '.event' <<< "$run_json")" == "workflow_dispatch" ]] || { echo "::error::Plan must come from a manual workflow dispatch."; exit 1; }
+          [[ "$(jq -r '.head_branch' <<< "$run_json")" == "main" ]] || { echo "::error::Plan workflow did not run on main."; exit 1; }
+          [[ "$(jq -r '.head_sha' <<< "$run_json")" == "$SOURCE_COMMIT" ]] || { echo "::error::Plan workflow commit does not match source_commit."; exit 1; }
+          [[ "$(jq -r '.conclusion' <<< "$run_json")" == "success" ]] || { echo "::error::Plan workflow did not complete successfully."; exit 1; }
+          [[ "$(jq -r '.path' <<< "$run_json")" == ".github/workflows/plan.yml" ]] || { echo "::error::Run ID is not from terraform-plan."; exit 1; }
+
+      - name: Download sanitized plan manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: cloudflare-plan-${{ inputs.source_commit }}
+          path: terraform/cloudflare
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.plan_run_id }}
+
+      # `kind` is what stops a lab manifest from being replayed here (and vice
+      # versa): both stacks plan from the same workflow, so run identity alone
+      # would not distinguish them.
+      - name: Verify artifact manifest and approved hash
+        id: manifest
+        env:
+          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          APPROVED_SHA256: ${{ inputs.plan_sha256 }}
+        run: |
+          set -euo pipefail
+          manifest_sha256="$(jq -r '.plan_sha256' cloudflare-plan-manifest.json)"
+          manifest_commit="$(jq -r '.commit_sha' cloudflare-plan-manifest.json)"
+          manifest_run_id="$(jq -r '.workflow_run_id' cloudflare-plan-manifest.json)"
+          manifest_repository="$(jq -r '.repository' cloudflare-plan-manifest.json)"
+          manifest_kind="$(jq -r '.kind' cloudflare-plan-manifest.json)"
+          manifest_blob="$(jq -r '.plan_blob' cloudflare-plan-manifest.json)"
+
+          [[ "$manifest_kind" == "apply-cloudflare" ]] || { echo "::error::Artifact is not a Cloudflare apply plan."; exit 1; }
+          [[ "$manifest_repository" == "$GITHUB_REPOSITORY" ]] || { echo "::error::Artifact repository mismatch."; exit 1; }
+          [[ "$manifest_commit" == "$SOURCE_COMMIT" ]] || { echo "::error::Artifact commit mismatch."; exit 1; }
+          [[ "$manifest_run_id" == "$PLAN_RUN_ID" ]] || { echo "::error::Artifact run ID mismatch."; exit 1; }
+          [[ "$manifest_sha256" == "$APPROVED_SHA256" ]] || { echo "::error::Manifest hash differs from approved hash."; exit 1; }
+          [[ "$manifest_blob" =~ ^cloudflare/apply/${SOURCE_COMMIT}-${PLAN_RUN_ID}-[0-9]+/cloudflare\.tfplan$ ]] || { echo "::error::Manifest plan_blob does not match the verified plan run identity."; exit 1; }
+          echo "blob=$manifest_blob" >> "$GITHUB_OUTPUT"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9.0"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve remote-state account
+        id: backend
+        run: |
+          set -euo pipefail
+          storage_account_name="$(az storage account list \
+            --resource-group rg-cham-tfstate \
+            --query '[0].name' \
+            --output tsv)"
+          if [[ -z "$storage_account_name" || "$storage_account_name" == "None" ]]; then
+            echo "::error::No Terraform state storage account was found in rg-cham-tfstate."
+            exit 1
+          fi
+          echo "::add-mask::$storage_account_name"
+          echo "name=$storage_account_name" >> "$GITHUB_OUTPUT"
+
+      - name: Download exact reviewed plan from private storage
+        env:
+          APPROVED_SHA256: ${{ inputs.plan_sha256 }}
+        run: |
+          set -euo pipefail
+          az storage blob download \
+            --account-name "${{ steps.backend.outputs.name }}" \
+            --container-name tfplans \
+            --name "${{ steps.manifest.outputs.blob }}" \
+            --file cloudflare.tfplan \
+            --auth-mode login \
+            --output none
+          computed_sha256="$(sha256sum cloudflare.tfplan | awk '{print $1}')"
+          [[ "$computed_sha256" == "$APPROVED_SHA256" ]] || { echo "::error::Saved-plan hash verification failed."; exit 1; }
+
+      - name: Apply exact reviewed Cloudflare plan
+        env:
+          # Environment-scoped edit token (DOC-B06): reachable only from this
+          # approved job, never from the scheduled drift run.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          terraform init -input=false -reconfigure \
+            -backend-config="storage_account_name=${{ steps.backend.outputs.name }}" \
+            -backend-config="subscription_id=${ARM_SUBSCRIPTION_ID}" \
+            -backend-config="tenant_id=${ARM_TENANT_ID}"
+          terraform apply -input=false cloudflare.tfplan

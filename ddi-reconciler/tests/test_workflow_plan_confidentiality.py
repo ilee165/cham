@@ -33,6 +33,11 @@ ALLOWED_ARTIFACT_PATHS = {
     "plan.yml": {
         "terraform/envs/lab/plan-manifest.json",
         "terraform/envs/lab/plan-summary.txt",
+        # The Cloudflare stack plans from the same workflow and travels the
+        # same custody chain: binary and complete delta to the private
+        # tfplans container, manifest and action/address summary in public.
+        "terraform/cloudflare/cloudflare-plan-manifest.json",
+        "terraform/cloudflare/cloudflare-plan-summary.txt",
     },
     "destroy.yml": {
         "terraform/envs/lab/destroy-manifest.json",
