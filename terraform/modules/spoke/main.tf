@@ -80,6 +80,11 @@ resource "azurerm_network_security_group" "spoke" {
     destination_address_prefix = "*"
   }
 
+  # NEW-IN-04 (2026-08-10 review): previously denied the hardcoded
+  # 10.10.0.0/16 supernet, so a spoke configured outside it was not covered.
+  # Denying the configured spoke list keeps the rule aligned with whatever
+  # CIDRs the caller actually deploys. Traffic from this spoke's own space is
+  # still admitted by AllowIntraSpoke (priority 150) before this rule fires.
   security_rule {
     name                       = "DenyOtherSpokes"
     priority                   = 200
@@ -88,7 +93,7 @@ resource "azurerm_network_security_group" "spoke" {
     protocol                   = "*"
     source_port_range          = "*"
     destination_port_range     = "*"
-    source_address_prefix      = "10.10.0.0/16" # whole Azure supernet
+    source_address_prefixes    = var.spoke_address_spaces
     destination_address_prefix = "*"
   }
   # DenyOtherSpokes runs before Azure's default AllowVnetInBound rule. Explicit

@@ -73,6 +73,7 @@ module "spoke_app" {
   hub_vnet_name        = module.hub.vnet_name
   hub_address_space    = module.hub.vnet_address_space
   hub_nva_ip           = module.hub.vm_private_ip
+  spoke_address_spaces = values(local.spoke_cidrs)
   onprem_address_space = var.onprem_address_space
   wg_transfer_cidr     = var.wg_transfer_cidr
   enable_test_vm       = local.test_vm_enabled.app
@@ -95,6 +96,7 @@ module "spoke_mgmt" {
   hub_vnet_name        = module.hub.vnet_name
   hub_address_space    = module.hub.vnet_address_space
   hub_nva_ip           = module.hub.vm_private_ip
+  spoke_address_spaces = values(local.spoke_cidrs)
   onprem_address_space = var.onprem_address_space
   wg_transfer_cidr     = var.wg_transfer_cidr
   enable_test_vm       = local.test_vm_enabled.mgmt

@@ -72,6 +72,20 @@ variable "hub_nva_ip" {
   type        = string
 }
 
+variable "spoke_address_spaces" {
+  description = "All spoke CIDRs in the lab, including this spoke's own. DenyOtherSpokes blocks them ahead of Azure's default AllowVnetInBound (NEW-IN-04 — was a hardcoded 10.10.0.0/16 that missed spokes outside the default supernet); this spoke's own traffic is admitted earlier by AllowIntraSpoke."
+  type        = list(string)
+
+  validation {
+    condition = alltrue([
+      for cidr in var.spoke_address_spaces :
+      can(cidrhost(cidr, 0)) &&
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", cidr))
+    ])
+    error_message = "every spoke_address_spaces entry must be an IPv4 CIDR like 10.10.4.0/24 — the list renders directly into this spoke's NSG deny rule."
+  }
+}
+
 variable "onprem_address_space" {
   description = "On-prem CIDR reachable via the tunnel"
   type        = string
