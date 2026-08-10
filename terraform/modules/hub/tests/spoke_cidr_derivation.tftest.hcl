@@ -96,3 +96,28 @@ run "public_address_space_is_rejected" {
 
   expect_failures = [var.address_space]
 }
+
+# PR #11 review: Terraform's CIDR functions read leading-zero octets as
+# decimal (010.010.0.0/16 == 10.10.0.0/16 to the RFC1918 check), but the
+# original string renders into iptables, which reads them as octal
+# (8.8.0.0/16) — bypassing the security property the validation enforces.
+
+run "leading_zero_spoke_cidr_is_rejected" {
+  command = plan
+
+  variables {
+    spoke_address_spaces = ["010.010.4.0/24"]
+  }
+
+  expect_failures = [var.spoke_address_spaces]
+}
+
+run "leading_zero_address_space_is_rejected" {
+  command = plan
+
+  variables {
+    address_space = "010.010.0.0/16"
+  }
+
+  expect_failures = [var.address_space]
+}

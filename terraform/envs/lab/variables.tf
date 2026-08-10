@@ -41,8 +41,9 @@ variable "lab_zone" {
 }
 
 variable "home_ip" {
-  description = "Home public IP /32. Set via TF_VAR_home_ip or terraform.tfvars (gitignored). NOT committed."
+  description = "Home public IP /32. Set via TF_VAR_home_ip or terraform.tfvars (gitignored). NOT committed. Sensitive so plan/apply output redacts the NSG rule rows that carry it (PR #11 review) — GitHub log masking is defense-in-depth, not the confidentiality boundary."
   type        = string
+  sensitive   = true
 
   validation {
     condition = (
