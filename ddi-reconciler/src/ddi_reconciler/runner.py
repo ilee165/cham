@@ -200,16 +200,31 @@ def plan_edge(edge: EdgeConfig, desired_all: list[CanonicalRecord], provider,
     actual = provider.fetch_actual({edge.zone})
 
     # Keys the provider read but will not write: Azure VM auto-registration owns
-    # them, or their record set could not be parsed. Either way they are absent
+    # them, or their record set could not be read. Either way they are absent
     # from `actual`, so a managed one would plan as ADD and fail only at apply.
-    unwritable = sorted(
-        ({*getattr(provider, "blocked_keys", ()), *getattr(provider, "unparseable_keys", ())})
-        & set(edge.managed_keys))
-    if unwritable:
+    # PR #11 review: the two causes carry different remedies, so the message
+    # names each key's actual reason instead of always suggesting a VM rename —
+    # an operator staring at an empty record set cannot act on rename advice.
+    blocked = sorted(set(getattr(provider, "blocked_keys", ())) & set(edge.managed_keys))
+    unparseable_src = getattr(provider, "unparseable_keys", {})
+    unparseable = sorted(set(unparseable_src) & set(edge.managed_keys))
+    if blocked or unparseable:
+        parts = []
+        if blocked:
+            parts.append(
+                f"managed key(s) {blocked} are owned by the provider (Azure VM "
+                "auto-registration) — rename the VM or remove the key from managed_keys")
+        if unparseable:
+            detail = "; ".join(
+                f"{'/'.join(key)}: "
+                + (unparseable_src.get(key, "could not be read at the edge")
+                   if isinstance(unparseable_src, dict)
+                   else "could not be read at the edge")
+                for key in unparseable)
+            parts.append(f"managed key(s) are unreadable at the edge — {detail}")
         raise UnwritableKeyError(
-            f"edge {edge.name!r}: managed key(s) {unwritable} are owned by the provider "
-            "(Azure VM auto-registration) or unreadable at the edge, so the reconciler will "
-            "not write them. Rename the VM or remove the key from managed_keys.")
+            f"edge {edge.name!r}: " + "; ".join(parts)
+            + ". The reconciler will not write them.")
 
     diff = diff_records(desired, actual, {edge.zone}, set(edge.managed_keys))
 

@@ -7,7 +7,7 @@ from azure.core import MatchConditions
 from ddi_reconciler.config import EdgeConfig
 from ddi_reconciler.model import CanonicalRecord, Diff, RecordUpdate
 from ddi_reconciler.providers.azure import AzureProvider
-from ddi_reconciler.runner import UnwritableKeyError, apply_edge
+from ddi_reconciler.runner import UnwritableKeyError, apply_edge, plan_edge
 
 Z = "azure.dwsolution.co"
 
@@ -463,3 +463,15 @@ def test_apply_refuses_a_managed_key_whose_record_set_is_empty():
     with pytest.raises(RuntimeError, match="could not be read"):
         provider.apply(Diff(to_add=[add]))
     assert client.record_sets.upserts == []
+
+
+def test_plan_edge_refuses_an_empty_managed_record_set_with_the_real_cause():
+    """PR #11 review: production hits plan_edge() before provider.apply(), so
+    the recorded 'carries no values' reason must surface through the real
+    boundary — not only through the direct apply() path the tests above use."""
+    provider, _ = make_provider([record_set("app", "A")])
+    edge = EdgeConfig(name="azure-private", provider="azure", zone=Z,
+                      managed_keys=frozenset({(Z, "app", "A")}))
+    desired = [CanonicalRecord(zone=Z, name="app", rtype="A", values=("10.10.4.30",))]
+    with pytest.raises(UnwritableKeyError, match="carries no values"):
+        plan_edge(edge, desired, provider)
