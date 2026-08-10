@@ -33,8 +33,26 @@ variable "disk_controller_type" {
 variable "resource_group_name" { type = string }
 
 variable "address_space" {
-  type    = string
-  default = "10.10.0.0/22"
+  description = "Hub VNet CIDR. NEW-WR-02: feeds local.internal_cidrs, so it renders into the public-IP hub's BIND ACLs, NSG allow rules, and NAT sources — validated like onprem_address_space."
+  type        = string
+  default     = "10.10.0.0/22"
+
+  validation {
+    condition = (
+      can(cidrhost(var.address_space, 0)) &&
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.address_space))
+    )
+    error_message = "address_space must be an IPv4 CIDR like 10.10.0.0/22 — it renders into named.conf ACLs, NSG rules, and the NAT script, so a malformed value fails at VM boot instead of plan."
+  }
+
+  validation {
+    condition = anytrue([
+      for block in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] :
+      tonumber(split("/", var.address_space)[1]) >= tonumber(split("/", block)[1]) &&
+      try(cidrsubnet(format("%s/%s", split("/", var.address_space)[0], split("/", block)[1]), 0, 0) == block, false)
+    ]) && tonumber(split("/", var.address_space)[1]) <= 29
+    error_message = "address_space must be an RFC1918 subnet no smaller than /29 — it feeds the public-IP hub's BIND allow-query/allow-recursion, NSG allow rules, and NAT masquerade sources, so a public or over-broad range would expose an open recursive resolver."
+  }
 }
 
 variable "vpn_subnet_cidr" {
@@ -104,8 +122,29 @@ variable "onprem_address_space" {
 }
 
 variable "spoke_address_spaces" {
-  description = "Spoke CIDRs permitted to transit the hub NVA toward Internet and on-premises destinations."
+  description = "Spoke CIDRs permitted to transit the hub NVA toward Internet and on-premises destinations. NEW-WR-02: each entry also feeds local.internal_cidrs and therefore the BIND ACLs, NSG allows, and NAT sources."
   type        = list(string)
+
+  validation {
+    condition = alltrue([
+      for cidr in var.spoke_address_spaces :
+      can(cidrhost(cidr, 0)) &&
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", cidr))
+    ])
+    error_message = "every spoke_address_spaces entry must be an IPv4 CIDR like 10.10.4.0/24 — each renders into named.conf ACLs, NSG rules, and the NAT script, so a malformed entry fails at VM boot instead of plan."
+  }
+
+  validation {
+    condition = alltrue([
+      for cidr in var.spoke_address_spaces :
+      anytrue([
+        for block in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] :
+        tonumber(split("/", cidr)[1]) >= tonumber(split("/", block)[1]) &&
+        try(cidrsubnet(format("%s/%s", split("/", cidr)[0], split("/", block)[1]), 0, 0) == block, false)
+      ]) && tonumber(split("/", cidr)[1]) <= 30
+    ])
+    error_message = "every spoke_address_spaces entry must be an RFC1918 subnet no smaller than /30 — each feeds the public-IP hub's BIND ACLs, NSG allow rules, and NAT sources, so a public or over-broad entry (e.g. 0.0.0.0/0) would silently expose an open recursive resolver."
+  }
 }
 
 variable "wg_transfer_cidr" {
