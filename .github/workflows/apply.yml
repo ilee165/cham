@@ -107,9 +107,12 @@ jobs:
 
       # The plan binary itself is NOT in the artifact (NEW-CR-01): it lives in
       # the private tfplans container and is fetched after Azure login below.
-      # This step verifies everything the manifest binds; the binary's hash is
-      # verified against the same approved value the moment it is downloaded.
+      # This step verifies everything the manifest binds — including that the
+      # blob path the manifest names belongs to this exact verified run (the
+      # attempt segment makes each reviewed plan immutable); the binary's hash
+      # is verified against the same approved value the moment it downloads.
       - name: Verify artifact manifest and approved hash
+        id: manifest
         env:
           PLAN_RUN_ID: ${{ inputs.plan_run_id }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
@@ -121,12 +124,15 @@ jobs:
           manifest_run_id="$(jq -r '.workflow_run_id' plan-manifest.json)"
           manifest_repository="$(jq -r '.repository' plan-manifest.json)"
           manifest_kind="$(jq -r '.kind' plan-manifest.json)"
+          manifest_blob="$(jq -r '.plan_blob' plan-manifest.json)"
 
           [[ "$manifest_kind" == "apply" ]] || { echo "::error::Artifact is not an apply plan."; exit 1; }
           [[ "$manifest_repository" == "$GITHUB_REPOSITORY" ]] || { echo "::error::Artifact repository mismatch."; exit 1; }
           [[ "$manifest_commit" == "$SOURCE_COMMIT" ]] || { echo "::error::Artifact commit mismatch."; exit 1; }
           [[ "$manifest_run_id" == "$PLAN_RUN_ID" ]] || { echo "::error::Artifact run ID mismatch."; exit 1; }
           [[ "$manifest_sha256" == "$APPROVED_SHA256" ]] || { echo "::error::Manifest hash differs from approved hash."; exit 1; }
+          [[ "$manifest_blob" =~ ^lab/apply/${SOURCE_COMMIT}-${PLAN_RUN_ID}-[0-9]+/tfplan$ ]] || { echo "::error::Manifest plan_blob does not match the verified plan run identity."; exit 1; }
+          echo "blob=$manifest_blob" >> "$GITHUB_OUTPUT"
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -154,21 +160,19 @@ jobs:
           echo "::add-mask::$storage_account_name"
           echo "name=$storage_account_name" >> "$GITHUB_OUTPUT"
 
-      # Blob path is reconstructed from inputs that earlier steps have already
-      # verified against the source run's identity (head_sha == source_commit,
-      # run is a successful main dispatch of plan.yml), so it can only name the
-      # blob that exact run wrote. Hash verification then pins the content.
+      # The blob path comes from the manifest, whose binding to this exact
+      # verified run (repository/commit/run/attempt) was checked above, so it
+      # can only name the blob that run wrote. Hash verification then pins the
+      # content byte-for-byte to what the operator approved.
       - name: Download exact reviewed plan from private storage
         env:
-          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
-          SOURCE_COMMIT: ${{ inputs.source_commit }}
           APPROVED_SHA256: ${{ inputs.plan_sha256 }}
         run: |
           set -euo pipefail
           az storage blob download \
             --account-name "${{ steps.backend.outputs.name }}" \
             --container-name tfplans \
-            --name "lab/apply/${SOURCE_COMMIT}-${PLAN_RUN_ID}/tfplan" \
+            --name "${{ steps.manifest.outputs.blob }}" \
             --file tfplan \
             --auth-mode login \
             --output none
