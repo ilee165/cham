@@ -172,12 +172,38 @@ jobs:
           } > plan-summary.txt
           cat plan-summary.txt >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload immutable saved-plan artifact
+      # NEW-CR-01 (2026-08-10 review): the raw plan binary embeds every input
+      # variable value (including the HOME_IP secret), the full prior state
+      # snapshot, and the backend configuration. On a public repository any
+      # authenticated GitHub user can download workflow artifacts, so the plan
+      # goes to the private state account instead — the same account both this
+      # job and the apply job already reach via OIDC — and the artifact below
+      # carries only the sanitized manifest and summary. The blob path encodes
+      # the commit and run ID, which the apply workflow independently verifies
+      # before reconstructing it; the SHA-256 chain pins the content either way.
+      - name: Store saved plan in the private state account
+        run: |
+          set -euo pipefail
+          az storage container create \
+            --name tfplans \
+            --account-name "${{ steps.backend.outputs.name }}" \
+            --auth-mode login \
+            --output none
+          az storage blob upload \
+            --account-name "${{ steps.backend.outputs.name }}" \
+            --container-name tfplans \
+            --name "lab/apply/${GITHUB_SHA}-${GITHUB_RUN_ID}/tfplan" \
+            --file tfplan \
+            --auth-mode login \
+            --overwrite true \
+            --output none
+          rm -f tfplan
+
+      - name: Upload sanitized plan-manifest artifact
         uses: actions/upload-artifact@v4
         with:
           name: terraform-plan-${{ github.sha }}
           path: |
-            terraform/envs/lab/tfplan
             terraform/envs/lab/plan-manifest.json
             terraform/envs/lab/plan-summary.txt
           if-no-files-found: error

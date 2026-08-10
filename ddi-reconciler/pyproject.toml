@@ -26,6 +26,9 @@ dev = [
     "pytest",
     "responses>=0.25",
     "ruff>=0.12",
+    # tests/test_workflow_plan_confidentiality.py parses .github/workflows to
+    # enforce the NEW-CR-01 rule that no raw saved plan ships as an artifact.
+    "pyyaml>=6",
 ]
 
 [tool.ruff.lint]

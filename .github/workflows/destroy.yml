@@ -149,12 +149,36 @@ jobs:
             echo "Nothing was destroyed. Start a second run with operation=apply, this run ID, and this exact hash."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload immutable destroy-plan artifact
+      # NEW-CR-01 (2026-08-10 review): the raw destroy plan embeds secret
+      # variable values, the full state snapshot, and the backend configuration,
+      # so it goes to the private tfplans container instead of a public-repo
+      # workflow artifact. The artifact keeps only the sanitized manifest and
+      # summary; the SHA-256 chain pins the blob's content at apply time.
+      - name: Store saved destroy plan in the private state account
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          az storage container create \
+            --name tfplans \
+            --account-name "${{ steps.backend.outputs.name }}" \
+            --auth-mode login \
+            --output none
+          az storage blob upload \
+            --account-name "${{ steps.backend.outputs.name }}" \
+            --container-name tfplans \
+            --name "lab/destroy/${SOURCE_COMMIT}-${GITHUB_RUN_ID}/destroy.tfplan" \
+            --file destroy.tfplan \
+            --auth-mode login \
+            --overwrite true \
+            --output none
+          rm -f destroy.tfplan
+
+      - name: Upload sanitized destroy-manifest artifact
         uses: actions/upload-artifact@v4
         with:
           name: terraform-destroy-${{ inputs.source_commit }}-${{ github.run_id }}
           path: |
-            terraform/envs/lab/destroy.tfplan
             terraform/envs/lab/destroy-manifest.json
             terraform/envs/lab/destroy-summary.txt
           if-no-files-found: error
@@ -222,7 +246,7 @@ jobs:
           [[ "$(jq -r '.conclusion' <<< "$run_json")" == "success" ]] || { echo "::error::Destroy-plan run did not complete successfully."; exit 1; }
           [[ "$(jq -r '.path' <<< "$run_json")" == ".github/workflows/destroy.yml" ]] || { echo "::error::Run ID is not from the destroy workflow."; exit 1; }
 
-      - name: Download reviewed destroy plan
+      - name: Download sanitized destroy manifest
         uses: actions/download-artifact@v4
         with:
           name: terraform-destroy-${{ inputs.source_commit }}-${{ inputs.plan_run_id }}
@@ -230,6 +254,9 @@ jobs:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.plan_run_id }}
 
+      # The destroy-plan binary is NOT in the artifact (NEW-CR-01): it lives in
+      # the private tfplans container and is fetched after Azure login below,
+      # where its hash is checked against the same approved value.
       - name: Verify destroy artifact manifest and approved hash
         env:
           PLAN_RUN_ID: ${{ inputs.plan_run_id }}
@@ -237,7 +264,6 @@ jobs:
           APPROVED_SHA256: ${{ inputs.plan_sha256 }}
         run: |
           set -euo pipefail
-          computed_sha256="$(sha256sum destroy.tfplan | awk '{print $1}')"
           manifest_sha256="$(jq -r '.plan_sha256' destroy-manifest.json)"
           manifest_commit="$(jq -r '.commit_sha' destroy-manifest.json)"
           manifest_run_id="$(jq -r '.workflow_run_id' destroy-manifest.json)"
@@ -249,7 +275,6 @@ jobs:
           [[ "$manifest_commit" == "$SOURCE_COMMIT" ]] || { echo "::error::Artifact commit mismatch."; exit 1; }
           [[ "$manifest_run_id" == "$PLAN_RUN_ID" ]] || { echo "::error::Artifact run ID mismatch."; exit 1; }
           [[ "$manifest_sha256" == "$APPROVED_SHA256" ]] || { echo "::error::Manifest hash differs from approved hash."; exit 1; }
-          [[ "$computed_sha256" == "$APPROVED_SHA256" ]] || { echo "::error::Saved destroy-plan hash verification failed."; exit 1; }
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -276,6 +301,26 @@ jobs:
           fi
           echo "::add-mask::$storage_account_name"
           echo "name=$storage_account_name" >> "$GITHUB_OUTPUT"
+
+      # Blob path is reconstructed from inputs already verified against the
+      # source run's identity, so it can only name the blob that exact
+      # destroy-plan run wrote; the hash check pins the content.
+      - name: Download exact reviewed destroy plan from private storage
+        env:
+          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          APPROVED_SHA256: ${{ inputs.plan_sha256 }}
+        run: |
+          set -euo pipefail
+          az storage blob download \
+            --account-name "${{ steps.backend.outputs.name }}" \
+            --container-name tfplans \
+            --name "lab/destroy/${SOURCE_COMMIT}-${PLAN_RUN_ID}/destroy.tfplan" \
+            --file destroy.tfplan \
+            --auth-mode login \
+            --output none
+          computed_sha256="$(sha256sum destroy.tfplan | awk '{print $1}')"
+          [[ "$computed_sha256" == "$APPROVED_SHA256" ]] || { echo "::error::Saved destroy-plan hash verification failed."; exit 1; }
 
       - name: Apply exact reviewed destroy plan
         run: |

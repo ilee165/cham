@@ -7,6 +7,13 @@
   protection is absent and independently verify the planned main commit.
 - The OIDC principal has Contributor at subscription scope and Storage Blob
   Data Contributor on the state storage account; shared keys are disabled.
+- Saved plan binaries never ship as workflow artifacts: on a public
+  repository any authenticated GitHub user can download artifacts, and a
+  plan file embeds secret variable values, the full state snapshot, and the
+  backend configuration (NEW-CR-01, 2026-08-10 review). Plans are stored as
+  blobs in the private `tfplans` container of the state storage account;
+  the artifact carries only the sanitized manifest and summary, and apply
+  re-verifies the blob's SHA-256 against the operator-approved hash.
 - Repository secrets/variables named by the workflow are configured. Neither a
   branch push nor a merge applies infrastructure; apply is a separate manual
   exact-artifact dispatch. As of the Phase 2 post-review correction, these
