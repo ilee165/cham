@@ -184,14 +184,31 @@ def main(argv: list[str] | None = None) -> int:
         guards = {"truth_complete": truth_verified,
                   "allow_empty_truth": args.allow_empty_truth,
                   "allow_unverified_truth": args.allow_unverified_truth}
+        unchecked: list[str] = []
         for edge in edges:
             current = edge.name
             mutating.clear()
-            if args.apply:
-                result = apply_edge(edge, desired_all, providers[edge.name],
-                                    on_mutate=mutating.append, **guards)
-            else:
-                result = plan_edge(edge, desired_all, providers[edge.name], **guards)
+            try:
+                if args.apply:
+                    result = apply_edge(edge, desired_all, providers[edge.name],
+                                        on_mutate=mutating.append, **guards)
+                else:
+                    result = plan_edge(edge, desired_all, providers[edge.name], **guards)
+            except (OSError, RuntimeError, ValueError) as exc:
+                if args.apply:
+                    # An --apply that failed may have left this edge partly
+                    # mutated, and writing on to the next edge after an
+                    # unexplained failure is how a bad state spreads. Stop and
+                    # account for what landed.
+                    raise
+                # --dry-run only reads, so one unreachable edge must not cost
+                # the others their check. Before this, the first edge to raise
+                # ended the whole run — which meant an Azure outage could
+                # suppress the public zone's drift report entirely, even
+                # though nothing was wrong with it.
+                print(f"error: [{edge.name}] {exc}", file=sys.stderr)
+                unchecked.append(edge.name)
+                continue
             _print_diff(edge.name, result.diff, result.dropped_desired,
                         result.split_ttl_keys, result.proxied_keys)
             changes = (len(result.diff.to_add) + len(result.diff.to_update)
@@ -207,8 +224,18 @@ def main(argv: list[str] | None = None) -> int:
 
         drifted = bool(adds or updates or deletes)
         applied_note = " — applied" if args.apply and drifted else ""
+        checked = len(edges) - len(unchecked)
+        scope = (f"across {checked} of {len(edges)} edge(s)" if unchecked
+                 else f"across {len(edges)} edge(s)")
         print(f"summary: {adds} add, {updates} update, {deletes} delete "
-              f"across {len(edges)} edge(s){applied_note}")
+              f"{scope}{applied_note}")
+        if unchecked:
+            # Exit 1, not 2, even if the edges that did run found drift: an
+            # incomplete answer is an operational error, and the drift gate
+            # treats 1 as "the tool did not run to completion".
+            print(f"error: {len(unchecked)} edge(s) could not be checked: "
+                  f"{', '.join(unchecked)}", file=sys.stderr)
+            return 1
         return 2 if (args.dry_run and drifted) else 0
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

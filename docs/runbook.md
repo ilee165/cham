@@ -14,6 +14,14 @@
   from any ref but `main`.
 - The OIDC principal has Contributor at subscription scope and Storage Blob
   Data Contributor on the state storage account; shared keys are disabled.
+- **Every environment needs its own federated credential.** A job declaring
+  `environment: X` presents the subject `<prefix>:environment:X`, never the
+  branch subject, so adding an environment without adding the matching
+  credential produces a job that passes every verification step and then dies
+  at `azure/login` with no matching federated identity. This repository's
+  prefix embeds numeric owner/repo IDs — read it from
+  `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` rather than
+  assuming the documented `repo:OWNER/REPO:...` form, which is wrong here.
 - Saved plan binaries and their complete human-readable output never ship
   as workflow artifacts **or appear in workflow logs**: on a public
   repository any authenticated GitHub user can download both, and a plan
@@ -164,7 +172,9 @@ Minimum VM sequence (unconditional):
 ## CI operations
 
 **Plan.** Actions → `terraform-plan` → Run workflow on `main`. Pick `stack`
-(`lab`, `cloudflare`, or `both`); the VM/NIC/resolver booleans apply to the
+(`lab` or `cloudflare` — one stack per dispatch, so a failure planning one
+can never invalidate an already-reviewed plan for the other); the
+VM/NIC/resolver booleans apply to the
 lab stack only. Nothing plans on a pull request — PRs run the
 credential-free checks and nothing else. Note the run ID and the SHA-256
 from the run summary, then read the complete delta from private storage

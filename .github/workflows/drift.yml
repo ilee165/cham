@@ -94,13 +94,31 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
+          # The resource group and zone come from config.toml, the same file
+          # the reconciler reads, rather than being copied into this workflow.
+          # A literal here would drift from the config silently: rename the
+          # zone in both Terraform and config.toml and the probe would
+          # legitimately find nothing, skip the edge, and report a green night
+          # for an edge nobody checked.
+          resource_group="$(python -c "
+          import tomllib, pathlib
+          config = tomllib.loads(pathlib.Path('ddi-reconciler/config.toml').read_text())
+          print(config['azure']['resource_group'])
+          ")"
+          zone="$(python -c "
+          import tomllib, pathlib
+          config = tomllib.loads(pathlib.Path('ddi-reconciler/config.toml').read_text())
+          print(next(e['zone'] for e in config['edges'] if e['name'] == 'azure-private'))
+          ")"
+          echo "Probing zone '$zone' in '$resource_group' (from config.toml)."
+
           # Resource-group presence is NOT zone presence. An apply interrupted
           # after the resource group is created but before the private-dns
           # module runs, or a destroy interrupted the other way, leaves an RG
           # that exists around a zone that does not — and the reconciler's
           # Azure provider raises rather than reporting an empty edge. Probe
           # the zone itself so that state skips the edge instead of failing it.
-          rg_present="$(az group exists --name rg-cham-lab --output tsv)"
+          rg_present="$(az group exists --name "$resource_group" --output tsv)"
           case "$rg_present" in
             true|false) ;;
             *) echo "::error::az group exists returned '${rg_present}' — indeterminate."; exit 1 ;;
@@ -109,18 +127,18 @@ jobs:
           present=false
           if [[ "$rg_present" == "true" ]]; then
             zone_count="$(az network private-dns zone list \
-              --resource-group rg-cham-lab \
-              --query "length([?name=='azure.dwsolution.co'])" --output tsv)"
+              --resource-group "$resource_group" \
+              --query "length([?name=='${zone}'])" --output tsv)"
             # An indeterminate answer must never be read as "absent": that
             # would report a converged night for an edge nobody checked.
             [[ "$zone_count" =~ ^[0-9]+$ ]] \
               || { echo "::error::zone query returned '${zone_count}' — indeterminate."; exit 1; }
-            [[ "$zone_count" -ge 1 ]] && present=true
+            if [[ "$zone_count" -ge 1 ]]; then present=true; fi
           fi
 
           echo "present=$present" >> "$GITHUB_OUTPUT"
           if [[ "$present" != "true" ]]; then
-            echo "azure.dwsolution.co is absent — the lab is down; checked the public edge only." \
+            echo "${zone} is absent from ${resource_group} — the lab is down; checked the public edge only." \
               >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -175,14 +193,18 @@ jobs:
             // reconciler-owned), so creating unconditionally would file a
             // fresh issue every night of a live session and bury the public
             // signal under duplicates.
-            const open = await github.rest.issues.listForRepo({
-              ...context.repo, state: 'open', labels: 'drift', per_page: 1,
-            });
+            // listForRepo returns open PULL REQUESTS as well as issues, so a
+            // drift-labelled PR — one opened to heal the drift, say — would
+            // become the target and quietly absorb every future report as a
+            // comment while no issue was ever filed.
+            const open = (await github.rest.issues.listForRepo({
+              ...context.repo, state: 'open', labels: 'drift', per_page: 100,
+            })).data.filter((item) => !item.pull_request);
             const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            if (open.data.length > 0) {
+            if (open.length > 0) {
               await github.rest.issues.createComment({
                 ...context.repo,
-                issue_number: open.data[0].number,
+                issue_number: open[0].number,
                 body: `Still drifting as of ${new Date().toISOString().slice(0, 10)} ([run](${run})):\n\n${body}`,
               });
             } else {
@@ -214,4 +236,12 @@ jobs:
           if [[ -n "$failed" ]]; then
             echo "::error::The public edge was checked and reported, but the ${failed} failed — the azure-private edge was NOT checked this run."
             exit 1
+          fi
+
+          # A failure in the PUBLIC step skips every unconditioned step after
+          # it, so the azure outcomes read `skipped`, not `failure`. The run is
+          # already red for Cloudflare; without this the operator fixes that
+          # and never learns the azure edge went unchecked the same night.
+          if [[ "$LOGIN" == "skipped" && "$ZONE" == "skipped" && "$AZURE" == "skipped" ]]; then
+            echo "::warning::The azure-private edge was not checked: the public-edge step did not succeed, so every Azure step was skipped. Re-run once the public edge is healthy."
           fi

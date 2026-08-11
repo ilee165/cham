@@ -133,9 +133,11 @@ jobs:
           terraform plan -destroy -input=false -no-color -out=destroy.tfplan > destroy-output.txt 2>&1 || plan_exit=$?
           if [[ "$plan_exit" -ne 0 ]]; then
             stored=true
+            # Only the upload decides whether the output survived; a failed
+            # container create (it usually already exists) does not.
             az storage container create --name tfplans \
               --account-name "${{ steps.backend.outputs.name }}" \
-              --auth-mode login --output none || stored=false
+              --auth-mode login --output none || true
             az storage blob upload \
               --account-name "${{ steps.backend.outputs.name }}" \
               --container-name tfplans \
@@ -251,15 +253,16 @@ jobs:
             exit 1
           fi
 
-          protected_branches="$(jq -r '.deployment_branch_policy.protected_branches // false' <<< "$environment_json")"
-          if [[ "$protected_branches" != "true" ]]; then
-            custom_branches="$(gh api \
-              "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT_NAME/deployment-branch-policies" \
-              --jq '[.branch_policies[].name] | sort | join(",")' 2>/dev/null || echo "")"
-            if [[ "$custom_branches" != "main" ]]; then
-              echo "::error::The $ENVIRONMENT_NAME environment does not restrict deployments to main (protected_branches=$protected_branches, custom=[$custom_branches]). Nothing was destroyed."
-              exit 1
-            fi
+          # `protected_branches` is not accepted as proof: it means "any branch
+          # a protection rule or ruleset covers", not "main". Only an explicit
+          # custom policy naming main and nothing else counts; an environment
+          # using protected_branches 404s here and fails closed.
+          custom_branches="$(gh api \
+            "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT_NAME/deployment-branch-policies" \
+            --jq '[.branch_policies[].name] | sort | join(",")' 2>/dev/null || echo "")"
+          if [[ "$custom_branches" != "main" ]]; then
+            echo "::error::The $ENVIRONMENT_NAME environment does not restrict deployments to main alone (custom branch policy: [$custom_branches]). Nothing was destroyed."
+            exit 1
           fi
 
       - name: Validate approval inputs

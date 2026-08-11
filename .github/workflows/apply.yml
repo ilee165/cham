@@ -79,15 +79,20 @@ jobs:
           # and it is the control that pins the executed workflow file — and
           # therefore every check in this job — to main. An unasserted control
           # is one nobody notices the loss of, so assert it here too.
-          protected_branches="$(jq -r '.deployment_branch_policy.protected_branches // false' <<< "$environment_json")"
-          if [[ "$protected_branches" != "true" ]]; then
-            custom_branches="$(gh api \
-              "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT_NAME/deployment-branch-policies" \
-              --jq '[.branch_policies[].name] | sort | join(",")' 2>/dev/null || echo "")"
-            if [[ "$custom_branches" != "main" ]]; then
-              echo "::error::The $ENVIRONMENT_NAME environment does not restrict deployments to main (protected_branches=$protected_branches, custom=[$custom_branches]). Nothing was applied."
-              exit 1
-            fi
+          #
+          # Deliberately NOT accepting GitHub's `protected_branches` setting as
+          # proof: it means "any branch covered by a branch protection rule or
+          # ruleset", not "main". A ruleset later targeting release/* or every
+          # branch would widen who may deploy while this check kept passing.
+          # Only an explicit custom policy naming main and nothing else counts;
+          # an environment using protected_branches returns 404 here and fails
+          # closed.
+          custom_branches="$(gh api \
+            "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT_NAME/deployment-branch-policies" \
+            --jq '[.branch_policies[].name] | sort | join(",")' 2>/dev/null || echo "")"
+          if [[ "$custom_branches" != "main" ]]; then
+            echo "::error::The $ENVIRONMENT_NAME environment does not restrict deployments to main alone (custom branch policy: [$custom_branches]). Nothing was applied."
+            exit 1
           fi
 
       - name: Validate approval inputs
@@ -265,15 +270,20 @@ jobs:
           # and it is the control that pins the executed workflow file — and
           # therefore every check in this job — to main. An unasserted control
           # is one nobody notices the loss of, so assert it here too.
-          protected_branches="$(jq -r '.deployment_branch_policy.protected_branches // false' <<< "$environment_json")"
-          if [[ "$protected_branches" != "true" ]]; then
-            custom_branches="$(gh api \
-              "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT_NAME/deployment-branch-policies" \
-              --jq '[.branch_policies[].name] | sort | join(",")' 2>/dev/null || echo "")"
-            if [[ "$custom_branches" != "main" ]]; then
-              echo "::error::The $ENVIRONMENT_NAME environment does not restrict deployments to main (protected_branches=$protected_branches, custom=[$custom_branches]). Nothing was applied."
-              exit 1
-            fi
+          #
+          # Deliberately NOT accepting GitHub's `protected_branches` setting as
+          # proof: it means "any branch covered by a branch protection rule or
+          # ruleset", not "main". A ruleset later targeting release/* or every
+          # branch would widen who may deploy while this check kept passing.
+          # Only an explicit custom policy naming main and nothing else counts;
+          # an environment using protected_branches returns 404 here and fails
+          # closed.
+          custom_branches="$(gh api \
+            "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT_NAME/deployment-branch-policies" \
+            --jq '[.branch_policies[].name] | sort | join(",")' 2>/dev/null || echo "")"
+          if [[ "$custom_branches" != "main" ]]; then
+            echo "::error::The $ENVIRONMENT_NAME environment does not restrict deployments to main alone (custom branch policy: [$custom_branches]). Nothing was applied."
+            exit 1
           fi
 
       - name: Validate approval inputs
