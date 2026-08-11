@@ -16,9 +16,9 @@ not happen.
 | Repository secrets | 9 (3 OIDC identifiers, 4 lab config, 2 Cloudflare tokens) | `gh secret list` |
 | `BUDGET_START_DATE` variable | `2026-08-01T00:00:00Z` | `gh variable list` |
 | Lab resource group | absent (destroyed after Phase 4) | `az group exists --name rg-cham-lab` → `false` |
-| Branch protection on `main` | PENDING | — |
-| `CLOUDFLARE_API_TOKEN` scoped to the `lab` environment only | PENDING | — |
-| Bootstrap `tfplans/` expiry policy applied | PENDING (plan saved: 1 add / 0 change / 0 destroy) | `terraform plan` in `terraform/bootstrap` |
+| Branch protection on `main` | strict, requires `Credential-free Terraform checks` + `tests` | `gh api .../branches/main/protection` |
+| `CLOUDFLARE_API_TOKEN` scoped to the `lab` environment only | yes — repository level holds `CLOUDFLARE_API_TOKEN_RO` alone | `gh secret list` / `gh secret list --env lab` |
+| Bootstrap `tfplans/` expiry policy applied | rule `expire-saved-plans`, prefix `tfplans/`, 7 days for base blobs and versions | `az storage account management-policy show` |
 
 ## Local gate re-run before execution (2026-08-10)
 
@@ -39,7 +39,7 @@ working tree:
 
 | # | Proof | Run | Outcome |
 |---|---|---|---|
-| 1 | PR → credential-free gate blocks merge until green; no plan, no cloud call on a PR | PENDING | — |
+| 1 | PR → credential-free gate blocks merge until green; no plan, no cloud call on a PR | PR [#12](https://github.com/ilee165/cham/pull/12), runs [31496365494](https://github.com/ilee165/cham/actions/runs/31496365494) (Terraform) and [31496365506](https://github.com/ilee165/cham/actions/runs/31496365506) (reconciler) | Both required checks green. Both saved-plan jobs **skipped** — `Saved plan from current main` and `Saved Cloudflare plan from current main` never started, so no credential was requested and no cloud call was made. Merge state moved `BLOCKED` → `CLEAN` only after both checks reported. |
 | 2 | Dispatched saved plan → private blob custody → environment-gated apply (lab) | PENDING | — |
 | 3 | Same custody chain for the Cloudflare stack | PENDING | — |
 | 4 | Drift, green path — converged, silent, no issue | PENDING | — |
