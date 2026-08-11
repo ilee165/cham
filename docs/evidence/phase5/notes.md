@@ -17,7 +17,8 @@ not happen.
 | `BUDGET_START_DATE` variable | `2026-08-01T00:00:00Z` | `gh variable list` |
 | Lab resource group | absent (destroyed after Phase 4) | `az group exists --name rg-cham-lab` → `false` |
 | Branch protection on `main` | strict, requires `Credential-free Terraform checks` + `tests` | `gh api .../branches/main/protection` |
-| `CLOUDFLARE_API_TOKEN` scoped to the `lab` environment only | yes — repository level holds `CLOUDFLARE_API_TOKEN_RO` alone | `gh secret list` / `gh secret list --env lab` |
+| `CLOUDFLARE_API_TOKEN` out of the repository scope | yes — repository level holds `CLOUDFLARE_API_TOKEN_RO` alone | `gh secret list` / `gh secret list --env lab` |
+| `cloudflare-prod` environment holding the edit token | PENDING — the 2026-08-11 review found `lab` also gates `destroy.yml`, so the token must move to its own environment | — |
 | Bootstrap `tfplans/` expiry policy applied | rule `expire-saved-plans`, prefix `tfplans/`, 7 days for base blobs and versions | `az storage account management-policy show` |
 
 ## Local gate re-run before execution (2026-08-10)

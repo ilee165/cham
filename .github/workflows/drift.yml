@@ -4,13 +4,26 @@ on:
     - cron: "0 6 * * *"   # 06:00 UTC nightly
   workflow_dispatch:
 
-# The public edge is checked on every run; the azure-private edge is checked
-# only when it exists. rg-cham-lab is destroyed between sessions for cost
-# control, so an unconditional two-edge run would fail every night against a
-# resource group that is absent by design — and a nightly job that is always
-# red detects nothing. The gate below asks Azure whether the lab is up and
-# builds the --edge list from the answer, so the same workflow is correct in
-# both states and needs no edit when the lab comes and goes.
+# Two edges, two invocations, deliberately in this order.
+#
+# The public edge is the half that faces the internet and shares a zone with
+# production Microsoft 365 mail records, so its check must not be able to fail
+# for any reason originating in Azure. It therefore runs FIRST, before any
+# cloud login, in its own `cham-reconcile` call with nothing but the read-only
+# Cloudflare token — exactly the credential-free shape this workflow had before
+# the Azure edge was added.
+#
+# Everything Azure is best-effort and runs after: login, the presence probe,
+# and the second invocation are all `continue-on-error`, so a rotated
+# federated credential, an Entra outage, or a half-built lab cannot suppress
+# the public result or the drift issue. A final step still turns any Azure-side
+# failure into a red run, so nothing fails silently — it just fails after the
+# public signal has already landed.
+#
+# Why two calls rather than one with two --edge flags: cham-reconcile iterates
+# edges in config.toml declaration order (azure-private is declared first) and
+# has no per-edge error isolation, so a single call would let any Azure error
+# abort the run before the public edge was ever fetched.
 permissions:
   contents: read
   issues: write
@@ -25,69 +38,32 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Read-only for this job's purposes: the reconciler runs --dry-run, and
-      # the only az call is the existence check below. The OIDC subject for a
-      # scheduled or dispatched run on the default branch is
-      # repo:<owner>/<repo>:ref:refs/heads/main.
-      - name: Azure login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Install uv
+        run: pip install -q uv
 
-      - name: Is the lab up?
-        id: lab
-        run: |
-          set -euo pipefail
-          lab_up="$(az group exists --name rg-cham-lab --output tsv)"
-          # Anything other than a clean true/false means the question was not
-          # actually answered (auth failure, throttling, a changed output
-          # shape). Guessing "false" there would silently downgrade the run to
-          # public-only and report a converged night that was never checked.
-          case "$lab_up" in
-            true|false) ;;
-            *) echo "::error::az group exists returned '${lab_up}' — cannot determine whether the lab is up."; exit 1 ;;
-          esac
-          echo "lab_up=$lab_up" >> "$GITHUB_OUTPUT"
-
-      - name: Run reconciler dry-run
-        id: reconcile
+      - name: Check the public edge
+        id: public
         working-directory: ddi-reconciler
         env:
           # --dry-run only ever issues GETs (GET /zones, GET /dns_records), so
           # the read-only token is sufficient. This job runs unattended on a
           # schedule: giving it a token that physically cannot mutate DNS means
-          # a bug here can misreport, but never destroy. DNS:Edit stays in the
-          # lab environment, behind that gate, for jobs a human triggered.
+          # a bug here can misreport, but never destroy. DNS:Edit lives in the
+          # cloudflare-prod environment, behind that gate, for jobs a human
+          # triggered.
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_RO }}
-          # The Azure provider reads this explicitly; azure/login does not set
-          # it. Credentials themselves come from the login session that
-          # DefaultAzureCredential picks up.
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          LAB_UP: ${{ steps.lab.outputs.lab_up }}
         run: |
-          pip install -q uv
-
-          edges=(--edge cloudflare-public)
-          if [[ "$LAB_UP" == "true" ]]; then
-            edges+=(--edge azure-private)
-          else
-            echo "rg-cham-lab is absent — checked the public edge only." \
-              >> "$GITHUB_STEP_SUMMARY"
-          fi
-
           # cham-reconcile's exit-code contract (see ddi_reconciler/cli.py):
           #   0 converged, 1 operational error, 2 drift found (dry-run only).
           # Actions' default bash runs with -e/-o pipefail, so a nonzero exit
-          # from this pipeline would otherwise abort the step before the
-          # branch below can read it. Disable errexit around just this
-          # command, and read PIPESTATUS[0] rather than $? so tee's own
-          # always-zero exit can never mask cham-reconcile's real one.
+          # from this pipeline would otherwise abort the step before the gate
+          # below can read it. Disable errexit around just this command, and
+          # read PIPESTATUS[0] rather than $? so tee's own always-zero exit can
+          # never mask cham-reconcile's real one.
           set +e
-          uv run cham-reconcile --dry-run "${edges[@]}" \
+          uv run cham-reconcile --dry-run --edge cloudflare-public \
             --desired-from-file desired-records.json \
-            | tee "$GITHUB_WORKSPACE/drift.txt"
+            | tee "$GITHUB_WORKSPACE/drift-public.txt"
           exit_code="${PIPESTATUS[0]}"
           set -e
 
@@ -95,20 +71,147 @@ jobs:
 
           # WR-01: only 0 (converged) and 2 (drift found) mean the tool ran to
           # completion; the gate script fails closed on 1 AND on every
-          # unexpected status (126/127/137/...), which the old inline check
-          # silently accepted. On 2 the job continues to the drift-issue step,
-          # which branches on the captured code.
+          # unexpected status (126/127/137/...). On 2 the job continues to the
+          # drift-issue step, which branches on the captured code.
           bash "$GITHUB_WORKSPACE/scripts/check-drift-exit.sh" "$exit_code"
-      - name: Open issue on drift
-        if: steps.reconcile.outputs.exit_code == '2'
+
+      # ---------------------------------------------------------------- Azure
+      # Everything below is best-effort by construction. The public edge has
+      # already been checked and gated; nothing here may take that away.
+
+      - name: Azure login (OIDC)
+        id: login
+        continue-on-error: true
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Does the private zone exist?
+        id: zone
+        if: steps.login.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # Resource-group presence is NOT zone presence. An apply interrupted
+          # after the resource group is created but before the private-dns
+          # module runs, or a destroy interrupted the other way, leaves an RG
+          # that exists around a zone that does not — and the reconciler's
+          # Azure provider raises rather than reporting an empty edge. Probe
+          # the zone itself so that state skips the edge instead of failing it.
+          rg_present="$(az group exists --name rg-cham-lab --output tsv)"
+          case "$rg_present" in
+            true|false) ;;
+            *) echo "::error::az group exists returned '${rg_present}' — indeterminate."; exit 1 ;;
+          esac
+
+          present=false
+          if [[ "$rg_present" == "true" ]]; then
+            zone_count="$(az network private-dns zone list \
+              --resource-group rg-cham-lab \
+              --query "length([?name=='azure.dwsolution.co'])" --output tsv)"
+            # An indeterminate answer must never be read as "absent": that
+            # would report a converged night for an edge nobody checked.
+            [[ "$zone_count" =~ ^[0-9]+$ ]] \
+              || { echo "::error::zone query returned '${zone_count}' — indeterminate."; exit 1; }
+            [[ "$zone_count" -ge 1 ]] && present=true
+          fi
+
+          echo "present=$present" >> "$GITHUB_OUTPUT"
+          if [[ "$present" != "true" ]]; then
+            echo "azure.dwsolution.co is absent — the lab is down; checked the public edge only." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check the azure edge
+        id: azure
+        if: steps.zone.outputs.present == 'true'
+        continue-on-error: true
+        working-directory: ddi-reconciler
+        env:
+          # The Azure provider reads this explicitly; azure/login does not set
+          # it. Credentials themselves come from the login session that
+          # DefaultAzureCredential picks up.
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set +e
+          uv run cham-reconcile --dry-run --edge azure-private \
+            --desired-from-file desired-records.json \
+            | tee "$GITHUB_WORKSPACE/drift-azure.txt"
+          exit_code="${PIPESTATUS[0]}"
+          set -e
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+          bash "$GITHUB_WORKSPACE/scripts/check-drift-exit.sh" "$exit_code"
+
+      # Disclosure note, recorded because this repository's default is the
+      # opposite: the diff below is published to a public issue and a public
+      # run log on purpose. For the public edge that is definitionally public
+      # data. For the private edge, the desired side is already committed in
+      # desired-records.json and the actual side is an RFC1918 address inside
+      # the addressing plan docs/architecture.md publishes — while the value is
+      # the entire diagnostic content of a drift report, so redacting it would
+      # leave an alert nobody can act on. Records outside managed_keys are
+      # printed as SKIP with name and type only, never values.
+      - name: Report drift
+        if: >-
+          always()
+          && (steps.public.outputs.exit_code == '2'
+              || steps.azure.outputs.exit_code == '2')
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const drift = fs.readFileSync('drift.txt', 'utf8');
-            github.rest.issues.create({
-              ...context.repo,
-              title: `DNS drift detected — ${new Date().toISOString().slice(0,10)}`,
-              body: `Nightly reconciler dry-run found drift:\n\`\`\`\n${drift}\n\`\`\``,
-              labels: ['drift']
+            const read = (f) => fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '';
+            const body = [
+              ['public edge (Cloudflare)', read('drift-public.txt')],
+              ['private edge (Azure)', read('drift-azure.txt')],
+            ].filter(([, text]) => text.trim())
+             .map(([label, text]) => `**${label}**\n\`\`\`\n${text}\n\`\`\``)
+             .join('\n\n');
+
+            // One open issue at a time. The azure edge legitimately reports an
+            // ADD for every rebuilt lab (Terraform seeds `db`; `app` is
+            // reconciler-owned), so creating unconditionally would file a
+            // fresh issue every night of a live session and bury the public
+            // signal under duplicates.
+            const open = await github.rest.issues.listForRepo({
+              ...context.repo, state: 'open', labels: 'drift', per_page: 1,
             });
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            if (open.data.length > 0) {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: open.data[0].number,
+                body: `Still drifting as of ${new Date().toISOString().slice(0, 10)} ([run](${run})):\n\n${body}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                ...context.repo,
+                title: `DNS drift detected — ${new Date().toISOString().slice(0, 10)}`,
+                body: `Nightly reconciler dry-run found drift ([run](${run})):\n\n${body}`,
+                labels: ['drift'],
+              });
+            }
+
+      # The Azure half is allowed to fail without taking the public check or
+      # the drift issue with it — but it is not allowed to fail quietly.
+      - name: Fail if the azure edge could not be checked
+        if: always()
+        env:
+          LOGIN: ${{ steps.login.outcome }}
+          ZONE: ${{ steps.zone.outcome }}
+          AZURE: ${{ steps.azure.outcome }}
+        run: |
+          set -euo pipefail
+          # Written as plain `if`s rather than `[[ ... ]] && x=y`: under
+          # `set -e` a false AND-list is itself a failing command, so the
+          # terse form would fail this step on every healthy run.
+          failed=""
+          if [[ "$LOGIN" == "failure" ]]; then failed="Azure login"; fi
+          if [[ "$ZONE"  == "failure" ]]; then failed="private-zone presence probe"; fi
+          if [[ "$AZURE" == "failure" ]]; then failed="azure-private reconciler run"; fi
+          if [[ -n "$failed" ]]; then
+            echo "::error::The public edge was checked and reported, but the ${failed} failed — the azure-private edge was NOT checked this run."
+            exit 1
+          fi

@@ -14,7 +14,12 @@ on:
         required: true
         type: choice
         default: lab
-        options: [lab, cloudflare, both]
+        # Deliberately no "both": apply.yml requires the source run's
+        # conclusion to be `success`, so a run containing both stacks would let
+        # a transient Cloudflare API failure invalidate an already-reviewed lab
+        # plan and force the whole review cycle to repeat. Two dispatches, two
+        # run conclusions, two independent approvals.
+        options: [lab, cloudflare]
       enable_test_vm_app:
         description: Preserve/create the app test VM in this plan
         required: true
@@ -74,6 +79,12 @@ jobs:
           # silently does not run. TFLINT_CONFIG_FILE is read by each child
           # run, so it is what actually makes one shared config apply.
           TFLINT_CONFIG_FILE: ${{ github.workspace }}/terraform/.tflint.hcl
+          # `--init` fetches the azurerm ruleset through the GitHub releases
+          # API. Unauthenticated installs share the 60-requests-per-hour
+          # anonymous limit per source IP across hosted runners, and this job
+          # is a required check on every PR — a rate-limit hit would block all
+          # of them. The token makes the install authenticated.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: tflint --init && tflint --recursive
         working-directory: terraform
 
@@ -93,16 +104,14 @@ jobs:
             terraform -chdir="$directory" validate -no-color
           done
 
-  # The two saved-plan jobs are selected by the `stack` input rather than both
-  # running on every dispatch. apply.yml requires the source run's conclusion to
-  # be `success`, so coupling the stacks into one run would let a Cloudflare
-  # plan failure block an unrelated, perfectly good lab apply.
+  # Exactly one saved-plan job runs per dispatch, selected by `stack`. The two
+  # stacks never share a run conclusion, because apply.yml keys on it.
   plan:
     name: Saved plan from current main
     if: >-
       github.event_name == 'workflow_dispatch'
       && github.ref == 'refs/heads/main'
-      && (inputs.stack == 'lab' || inputs.stack == 'both')
+      && inputs.stack == 'lab'
     needs: static
     runs-on: ubuntu-latest
     permissions:
@@ -183,16 +192,26 @@ jobs:
           plan_exit=0
           terraform plan -input=false -no-color -out=tfplan > plan-output.txt 2>&1 || plan_exit=$?
           if [[ "$plan_exit" -ne 0 ]]; then
+            stored=true
             az storage container create --name tfplans \
               --account-name "${{ steps.backend.outputs.name }}" \
-              --auth-mode login --output none || true
+              --auth-mode login --output none || stored=false
             az storage blob upload \
               --account-name "${{ steps.backend.outputs.name }}" \
               --container-name tfplans \
               --name "${blob_prefix}/plan-output.txt" \
               --file plan-output.txt --auth-mode login --overwrite false --output none \
-              || echo "::warning::The failed plan's output could not be stored privately."
-            echo "::error::terraform plan exited ${plan_exit}. The complete output is private at tfplans/${blob_prefix}/plan-output.txt (az storage blob download — see the runbook); it is not printed here because plan output on a public repository discloses state-derived values."
+              || stored=false
+            # Both az calls above are allowed to fail, so the message must not
+            # state as fact that the output is retrievable. Terraform's stdout
+            # and stderr went to that file and were never echoed, so if the
+            # upload lost them, this log is all the operator has — say so
+            # rather than sending them to a blob that is not there.
+            if [[ "$stored" == "true" ]]; then
+              echo "::error::terraform plan exited ${plan_exit}. The complete output is private at tfplans/${blob_prefix}/plan-output.txt (az storage blob download — see the runbook); it is not printed here because plan output on a public repository discloses state-derived values."
+            else
+              echo "::error::terraform plan exited ${plan_exit} AND its output could not be stored privately — nothing was written to tfplans/${blob_prefix}/, so no diagnostics survive this run. Reproduce locally with the same variables. The output is withheld from this log because it discloses state-derived values."
+            fi
             exit "$plan_exit"
           fi
 
@@ -263,7 +282,18 @@ jobs:
             terraform/envs/lab/plan-manifest.json
             terraform/envs/lab/plan-summary.txt
           if-no-files-found: error
-          retention-days: 3
+          # Matches the tfplans lifecycle policy. The runbook tells the
+          # operator the review window is a week; an artifact expiring first
+          # would spend a human approval and only then fail the download.
+          retention-days: 7
+          # A re-run writes a new attempt-scoped blob, but the artifact name is
+          # keyed on the commit alone. Without this the manifest upload 409s on
+          # the existing name and flips the run conclusion to failure,
+          # permanently disqualifying an otherwise good plan from apply.
+          # Overwriting is safe because the manifest is bound by hash: an
+          # operator holding the earlier attempt's approved SHA-256 gets a
+          # mismatch and is refused.
+          overwrite: true
 
   # The public-DNS half of the split horizon (ADR-004 keeps it in its own
   # state). It gets the identical custody chain to the lab stack — dispatch
@@ -276,7 +306,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch'
       && github.ref == 'refs/heads/main'
-      && (inputs.stack == 'cloudflare' || inputs.stack == 'both')
+      && inputs.stack == 'cloudflare'
     needs: static
     runs-on: ubuntu-latest
     permissions:
@@ -348,16 +378,21 @@ jobs:
           terraform plan -input=false -no-color -out=cloudflare.tfplan \
             > cloudflare-plan-output.txt 2>&1 || plan_exit=$?
           if [[ "$plan_exit" -ne 0 ]]; then
+            stored=true
             az storage container create --name tfplans \
               --account-name "${{ steps.backend.outputs.name }}" \
-              --auth-mode login --output none || true
+              --auth-mode login --output none || stored=false
             az storage blob upload \
               --account-name "${{ steps.backend.outputs.name }}" \
               --container-name tfplans \
               --name "${blob_prefix}/cloudflare-plan-output.txt" \
               --file cloudflare-plan-output.txt --auth-mode login --overwrite false --output none \
-              || echo "::warning::The failed plan's output could not be stored privately."
-            echo "::error::terraform plan exited ${plan_exit}. The complete output is private at tfplans/${blob_prefix}/cloudflare-plan-output.txt (az storage blob download — see the runbook); it is not printed here because plan output on a public repository discloses state-derived values."
+              || stored=false
+            if [[ "$stored" == "true" ]]; then
+              echo "::error::terraform plan exited ${plan_exit}. The complete output is private at tfplans/${blob_prefix}/cloudflare-plan-output.txt (az storage blob download — see the runbook); it is not printed here because plan output on a public repository discloses state-derived values."
+            else
+              echo "::error::terraform plan exited ${plan_exit} AND its output could not be stored privately — nothing was written to tfplans/${blob_prefix}/, so no diagnostics survive this run. Reproduce locally with the same variables. The output is withheld from this log because it discloses state-derived values."
+            fi
             exit "$plan_exit"
           fi
 
@@ -418,4 +453,15 @@ jobs:
             terraform/cloudflare/cloudflare-plan-manifest.json
             terraform/cloudflare/cloudflare-plan-summary.txt
           if-no-files-found: error
-          retention-days: 3
+          # Matches the tfplans lifecycle policy. The runbook tells the
+          # operator the review window is a week; an artifact expiring first
+          # would spend a human approval and only then fail the download.
+          retention-days: 7
+          # A re-run writes a new attempt-scoped blob, but the artifact name is
+          # keyed on the commit alone. Without this the manifest upload 409s on
+          # the existing name and flips the run conclusion to failure,
+          # permanently disqualifying an otherwise good plan from apply.
+          # Overwriting is safe because the manifest is bound by hash: an
+          # operator holding the earlier attempt's approved SHA-256 gets a
+          # mismatch and is refused.
+          overwrite: true

@@ -7,6 +7,21 @@
 tfplan
 crash.log
 
+# The human-readable half of a saved plan. The binary is anchored above, but
+# the review file carries the same disclosure — the complete delta, including
+# the home IP inside NSG rules and the hub public IP — which is exactly why CI
+# writes it to the private tfplans container instead of a log. The runbook
+# then tells the operator to download it into their working tree to review it
+# before approving a hash, and that tree is a clone of a PUBLIC repository.
+plan-output.txt
+destroy-output.txt
+*-plan-output.txt
+*-plan-summary.txt
+*-plan-manifest.json
+destroy-summary.txt
+destroy-manifest.json
+changed-resources.txt
+
 # Secrets & local config — NEVER commit
 *.tfvars
 !*.tfvars.example

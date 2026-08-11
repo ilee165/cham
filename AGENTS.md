@@ -17,7 +17,18 @@ This repository models a hybrid DNS/DDI lab. Under `terraform/`, reusable infras
 - `uv run ruff check .` checks Python style and import ordering.
 - `terraform fmt -recursive` formats every Terraform file; use `terraform fmt -check -recursive` before submitting.
 - From `terraform/envs/lab`, run `terraform init` and `terraform validate` for the main lab configuration.
-- `tflint --init && tflint --recursive` performs Terraform linting. CI also runs Checkov security scans.
+- Terraform linting, from the repository root:
+
+  ```bash
+  export TFLINT_CONFIG_FILE="$PWD/terraform/.tflint.hcl"
+  cd terraform && tflint --init && tflint --recursive
+  ```
+
+  The export is not optional. `--recursive` re-runs tflint inside each
+  directory and each child run looks for its own config, so without it the
+  azurerm ruleset never loads in `envs/lab` or `modules/*` and the lint passes
+  without having checked anything — while CI, which does set it, fails on
+  rules you had no local way to see. CI also runs Checkov security scans.
 
 Run `terraform plan`, inspect the output, and avoid applying infrastructure merely to verify a code change.
 

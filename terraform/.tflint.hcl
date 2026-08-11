@@ -1,11 +1,15 @@
 # tflint configuration for every root and module under terraform/.
 #
-# `tflint --recursive` (what plan.yml's credential-free job runs) reads this
-# file from the directory it is invoked in and passes it down, so the azurerm
-# ruleset below applies to the bootstrap, lab, and cloudflare roots as well as
-# to modules/*. Without a config file tflint loads only its built-in rules —
-# the provider-specific checks that catch invalid VM sizes, deprecated
-# arguments, and missing required attributes never run.
+# IMPORTANT — this file does NOT apply on its own. `tflint --recursive`
+# re-executes the linter inside each directory and every one of those child
+# runs looks for its own .tflint.hcl, so a config sitting here never reaches
+# terraform/envs/lab or terraform/modules/*. Measured: with this file present
+# but TFLINT_CONFIG_FILE unset, `tflint --only=<any azurerm rule>` fails with
+# "Rule not found" in every subdirectory — i.e. the azurerm ruleset silently
+# does not run and the lint passes vacuously.
+#
+# Set TFLINT_CONFIG_FILE to this file's absolute path before linting. CI does
+# it in plan.yml's TFLint step; locally, AGENTS.md documents the same command.
 
 config {
   # Modules are linted through --recursive on their own directories; do not

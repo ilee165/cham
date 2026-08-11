@@ -41,27 +41,53 @@ env:
 
 jobs:
   apply:
-    if: inputs.confirm == 'APPLY' && inputs.stack == 'lab'
+    # github.ref is constrained here as well as by the environment's
+    # deployment-branch policy. workflow_dispatch runs the workflow file from
+    # whatever ref was dispatched, and every verification step below lives
+    # inside that same file — so without this condition the branch policy is
+    # the only thing standing between a pushed branch and an apply job whose
+    # checks have been edited out.
+    if: >-
+      inputs.confirm == 'APPLY'
+      && inputs.stack == 'lab'
+      && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: lab
+    env:
+      ENVIRONMENT_NAME: lab
     defaults:
       run:
         shell: bash
         working-directory: terraform/envs/lab
 
     steps:
-      - name: Require configured environment reviewers
+      - name: Require configured environment protections
         env:
           GH_TOKEN: ${{ github.token }}
         working-directory: .
         run: |
           set -euo pipefail
-          reviewer_rules="$(gh api \
-            "repos/$GITHUB_REPOSITORY/environments/lab" \
-            --jq '[.protection_rules[] | select(.type == "required_reviewers")] | length')"
+          environment_json="$(gh api "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT_NAME")"
+
+          reviewer_rules="$(jq '[.protection_rules[] | select(.type == "required_reviewers")] | length' <<< "$environment_json")"
           if [[ "$reviewer_rules" -lt 1 ]]; then
-            echo "::error::The lab environment has no required-reviewer protection rule. Nothing was applied."
+            echo "::error::The $ENVIRONMENT_NAME environment has no required-reviewer protection rule. Nothing was applied."
             exit 1
+          fi
+
+          # The reviewer rule was already asserted; the branch policy was not,
+          # and it is the control that pins the executed workflow file — and
+          # therefore every check in this job — to main. An unasserted control
+          # is one nobody notices the loss of, so assert it here too.
+          protected_branches="$(jq -r '.deployment_branch_policy.protected_branches // false' <<< "$environment_json")"
+          if [[ "$protected_branches" != "true" ]]; then
+            custom_branches="$(gh api \
+              "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT_NAME/deployment-branch-policies" \
+              --jq '[.branch_policies[].name] | sort | join(",")' 2>/dev/null || echo "")"
+            if [[ "$custom_branches" != "main" ]]; then
+              echo "::error::The $ENVIRONMENT_NAME environment does not restrict deployments to main (protected_branches=$protected_branches, custom=[$custom_branches]). Nothing was applied."
+              exit 1
+            fi
           fi
 
       - name: Validate approval inputs
@@ -200,27 +226,54 @@ jobs:
   # init, and the edit-capable Cloudflare token only ever inside the
   # environment gate a human has just approved.
   apply-cloudflare:
-    if: inputs.confirm == 'APPLY' && inputs.stack == 'cloudflare'
+    if: >-
+      inputs.confirm == 'APPLY'
+      && inputs.stack == 'cloudflare'
+      && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: lab
+    # A separate environment, not `lab`. Environment secrets are scoped to the
+    # environment and never to a job, so parking the DNS:Edit token on `lab`
+    # would put it inside the secret scope of the lab apply AND of destroy.yml
+    # — meaning an operator approving a routine teardown from their phone would
+    # mechanically be approving a job that can read the token for the zone
+    # carrying dwsolution.co's Microsoft 365 mail records. Its own environment
+    # makes the approval prompt mean what the approval actually grants.
+    environment: cloudflare-prod
+    env:
+      ENVIRONMENT_NAME: cloudflare-prod
     defaults:
       run:
         shell: bash
         working-directory: terraform/cloudflare
 
     steps:
-      - name: Require configured environment reviewers
+      - name: Require configured environment protections
         env:
           GH_TOKEN: ${{ github.token }}
         working-directory: .
         run: |
           set -euo pipefail
-          reviewer_rules="$(gh api \
-            "repos/$GITHUB_REPOSITORY/environments/lab" \
-            --jq '[.protection_rules[] | select(.type == "required_reviewers")] | length')"
+          environment_json="$(gh api "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT_NAME")"
+
+          reviewer_rules="$(jq '[.protection_rules[] | select(.type == "required_reviewers")] | length' <<< "$environment_json")"
           if [[ "$reviewer_rules" -lt 1 ]]; then
-            echo "::error::The lab environment has no required-reviewer protection rule. Nothing was applied."
+            echo "::error::The $ENVIRONMENT_NAME environment has no required-reviewer protection rule. Nothing was applied."
             exit 1
+          fi
+
+          # The reviewer rule was already asserted; the branch policy was not,
+          # and it is the control that pins the executed workflow file — and
+          # therefore every check in this job — to main. An unasserted control
+          # is one nobody notices the loss of, so assert it here too.
+          protected_branches="$(jq -r '.deployment_branch_policy.protected_branches // false' <<< "$environment_json")"
+          if [[ "$protected_branches" != "true" ]]; then
+            custom_branches="$(gh api \
+              "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT_NAME/deployment-branch-policies" \
+              --jq '[.branch_policies[].name] | sort | join(",")' 2>/dev/null || echo "")"
+            if [[ "$custom_branches" != "main" ]]; then
+              echo "::error::The $ENVIRONMENT_NAME environment does not restrict deployments to main (protected_branches=$protected_branches, custom=[$custom_branches]). Nothing was applied."
+              exit 1
+            fi
           fi
 
       - name: Validate approval inputs
