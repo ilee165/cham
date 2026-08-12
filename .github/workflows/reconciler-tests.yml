@@ -8,11 +8,15 @@ name: reconciler-tests
 # So this job deliberately grants nothing. No secrets, no id-token, no cloud
 # login. If a test ever starts needing a credential or a network call, it fails
 # here rather than silently becoming untestable in CI.
+#
+# The pull_request trigger is deliberately unfiltered while the push trigger
+# is not. `tests` is a required status check on main, and a required check
+# that never runs never reports — GitHub holds the PR at "Expected" forever.
+# Path-filtering the PR side would therefore make every PR outside
+# ddi-reconciler/ unmergeable. The suite is offline and takes about three
+# seconds, so running it on every PR costs nothing worth filtering for.
 on:
   pull_request:
-    paths:
-      - "ddi-reconciler/**"
-      - ".github/workflows/reconciler-tests.yml"
   push:
     branches: [main]
     paths:

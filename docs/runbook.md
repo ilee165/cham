@@ -2,11 +2,26 @@
 
 ## CI prerequisites
 
-- GitHub environment `lab` has at least one required reviewer and permits
-  deployments from `main` only. The workflows fail closed when reviewer
-  protection is absent and independently verify the planned main commit.
+- Two GitHub environments, each with at least one required reviewer and
+  deployments permitted from `main` only: `lab` gates the Azure stack's apply
+  and destroy, `cloudflare-prod` gates the public-DNS apply. They are separate
+  because environment secrets are scoped to the environment and never to a
+  job — one shared environment would put the DNS:Edit token for the live M365
+  zone inside the secret scope of every lab teardown. Each gated job fails
+  closed if its environment is missing a required-reviewer rule **or** a
+  branch policy restricting it to `main`, and independently verifies the
+  planned main commit. The apply and destroy jobs additionally refuse to run
+  from any ref but `main`.
 - The OIDC principal has Contributor at subscription scope and Storage Blob
   Data Contributor on the state storage account; shared keys are disabled.
+- **Every environment needs its own federated credential.** A job declaring
+  `environment: X` presents the subject `<prefix>:environment:X`, never the
+  branch subject, so adding an environment without adding the matching
+  credential produces a job that passes every verification step and then dies
+  at `azure/login` with no matching federated identity. This repository's
+  prefix embeds numeric owner/repo IDs — read it from
+  `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` rather than
+  assuming the documented `repo:OWNER/REPO:...` form, which is wrong here.
 - Saved plan binaries and their complete human-readable output never ship
   as workflow artifacts **or appear in workflow logs**: on a public
   repository any authenticated GitHub user can download both, and a plan
@@ -27,11 +42,19 @@
   `lab/destroy/.../destroy-output.txt`). Approve the apply dispatch only
   after reading it. A bootstrap lifecycle policy expires plan blobs and
   their versions after 7 days.
-- Repository secrets/variables named by the workflow are configured. Neither a
+- Repository secrets/variables named by the workflows are configured
+  (Phase 5): the three OIDC identifiers, the four lab config secrets, the
+  two Cloudflare tokens, and the `BUDGET_START_DATE` variable. Neither a
   branch push nor a merge applies infrastructure; apply is a separate manual
-  exact-artifact dispatch. As of the Phase 2 post-review correction, these
-  secrets/variables are not yet configured; CI planning/apply remains a Phase 5
-  prerequisite and will fail closed in the meantime.
+  exact-artifact dispatch.
+- **Two Cloudflare tokens, two blast radii.** `CLOUDFLARE_API_TOKEN_RO`
+  (Zone:Read + DNS:Read) is a repository secret and is what the unattended
+  nightly drift job uses — a bug there can misreport but never mutate.
+  `CLOUDFLARE_API_TOKEN` (Zone:Read + DNS:Edit) lives **only** in the
+  `cloudflare-prod` environment — not in `lab`, which `destroy.yml` also uses,
+  and where approving a routine teardown would mechanically approve a job that
+  can read it. Replacing the read-only token with the edit token "because it
+  also works" removes the boundary the drift workflow was reviewed for.
 
 ## Session start
 1. For Phase 3, use the pinned laptop runtime below. The repository's
@@ -145,6 +168,58 @@ Minimum VM sequence (unconditional):
 4. `az resource list -g rg-cham-lab -o table` → must be empty
    (public IPs and disks survive VM deletion)
 5. `az consumption budget list` sanity check if unsure
+
+## CI operations
+
+**Plan.** Actions → `terraform-plan` → Run workflow on `main`. Pick `stack`
+(`lab` or `cloudflare` — one stack per dispatch, so a failure planning one
+can never invalidate an already-reviewed plan for the other); the
+VM/NIC/resolver booleans apply to the
+lab stack only. Nothing plans on a pull request — PRs run the
+credential-free checks and nothing else. Note the run ID and the SHA-256
+from the run summary, then read the complete delta from private storage
+before approving anything (procedure under CI prerequisites above; the
+Cloudflare stack's review file is
+`cloudflare/apply/<commit>-<run_id>-<attempt>/cloudflare-plan-output.txt`).
+
+**Apply.** Actions → `terraform-apply-reviewed-plan` → Run workflow from
+`main` with the same `stack`, the `plan_run_id`, the `source_commit` (must
+still be current `main`), the approved `plan_sha256`, and `confirm=APPLY`.
+The run pauses at "Waiting for review" on `lab` for the Azure stack or
+`cloudflare-prod` for the public one; approve it there. The job applies that
+exact saved plan and nothing else — it never re-plans. Both the plan blob and
+its manifest artifact live seven days, so the review window is a week for
+both.
+
+**Drift.** `nightly-drift` runs at 06:00 UTC and on dispatch, against the
+committed `desired-records.json` (ADR-006). The public edge is checked first,
+in its own credential-free invocation with the read-only token, so nothing on
+the Azure side can suppress it. The Azure edge is then checked only if the
+`azure.dwsolution.co` private zone actually exists, and every Azure step is
+best-effort: a failed login or probe still lets the public result and its
+issue land, then turns the run red at the end. Converged runs are green and
+silent; drift is a green run plus an issue labelled `drift` carrying the
+diff — or a comment on the open one, since only a single drift issue is kept
+open at a time. Heal with `uv run cham-reconcile --apply`, then close it. A
+run that fails loudly means exit 1, an exit code outside the 0/2/1 contract,
+or an Azure edge that could not be reached — treat it as a broken tool, not
+as drift.
+
+Expect an Azure-edge ADD for `app` on any freshly rebuilt lab: Terraform
+seeds only `db`, and `app` is reconciler-owned. That is real drift, not a
+false positive — heal it the same way.
+
+**Kill switch, from anywhere including a phone.** Actions →
+`terraform-destroy`, `operation=plan` + `confirm=PLAN_DESTROY`, review the
+deletions, then the same workflow with `operation=apply`, the plan run
+ID/hash, and `confirm=DESTROY`.
+
+**Two staleness traps.** `HOME_IP` must be re-set when the ISP rotates the
+home address — the symptom is a CI apply that succeeds and locks you out of
+SSH and WireGuard, because the NSG now allows a stranger's address instead
+of yours. `BUDGET_START_DATE` must be bumped to the first of the current
+month if a fresh CI apply fails variable validation on the budget start
+date.
 
 ## Private Resolver experiment (deferred — not part of Phase 3)
 

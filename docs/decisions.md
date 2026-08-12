@@ -72,7 +72,29 @@ interview material as much as documentation.
   control, so an unattended two-edge run would fail every night on a resource
   group that is absent by design — and a permanently red job detects nothing.
   The Azure edge is checked by hand during live sessions; extending the
-  schedule to gate on lab presence is Phase 5 work. The operational
+  schedule to gate on lab presence is Phase 5 work.
+- **Amended 2026-08-10 (Phase 5 — presence-gated, not excluded):** the
+  scheduled run now checks the Azure edge whenever it exists, so the "between
+  sessions the Azure edge is unmonitored" tradeoff below reads as
+  "unmonitored only while it does not exist". The read-only Cloudflare token
+  is unchanged — the unattended job still cannot mutate DNS.
+- **Amended 2026-08-11 (edge independence, after review):** the two edges run
+  as two separate `cham-reconcile` invocations, public first, and the public
+  one holds no cloud credential at all. The reason is that the reconciler
+  iterates edges in config order with no per-edge error isolation, so a single
+  two-edge call let any Azure fault abort the run before the internet-facing
+  Cloudflare edge — the one sharing a zone with production M365 records — was
+  ever fetched. Every Azure step is now best-effort: a failed login, an
+  indeterminate probe, or a failed Azure run still lets the public result and
+  its drift issue land, and only then turns the run red. Presence is probed on
+  the `azure.dwsolution.co` zone rather than on `rg-cham-lab`, because an
+  interrupted apply or destroy leaves a resource group around a zone that is
+  not there and the provider raises instead of reporting an empty edge. An
+  indeterminate answer is still a hard failure, never an assumed `false`.
+  Only one `drift`-labelled issue is kept open; further findings comment on
+  it, because a rebuilt lab legitimately reports an ADD for `app` every night
+  of a session and duplicates would bury the public signal.
+- The operational
   procedure — export at session end, snapshot diff review, drift-issue
   healing — lives in the runbook's "Reconciler snapshot + drift operations"
   section. CI additionally rejects a committed snapshot whose

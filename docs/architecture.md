@@ -1,5 +1,72 @@
 # Architecture
 
+## System view
+
+Every component and who talks to whom. The detailed Phase 3 data path, which
+proves the tunnel half of this picture, follows below.
+
+```mermaid
+flowchart LR
+  subgraph onprem["On-prem 10.20.0.0/16 (laptop)"]
+    spatium["SpatiumDDI control plane<br/>truth for all zones"]
+    bindL["BIND9: lab.dwsolution.co<br/>+ www override zone"]
+    kea["Kea DHCP"]
+    kea -- "lease → A record" --> bindL
+    spatium --- bindL
+  end
+
+  subgraph azure["Azure 10.10.0.0/16 (rg-cham-lab)"]
+    subgraph hub["Hub VNet 10.10.0.0/22"]
+      nva["D2als_v7 NVA 10.10.0.10<br/>WireGuard + BIND9 + SNAT"]
+    end
+    subgraph spokeA["Spoke A app 10.10.4.0/22"]
+      vmA["test VM"]
+    end
+    subgraph spokeB["Spoke B mgmt 10.10.8.0/22"]
+      vmB["test VM"]
+    end
+    pdns[("Private DNS<br/>azure.dwsolution.co")]
+    vmA -- "UDR 0/0" --> nva
+    vmB -- "UDR 0/0" --> nva
+    vmA -. "auto-register" .-> pdns
+    vmB -. "auto-register" .-> pdns
+    nva -- "168.63.129.16" --> pdns
+  end
+
+  cf[("Cloudflare<br/>dwsolution.co public")]
+  gh["GitHub Actions<br/>OIDC — no stored cloud secrets"]
+  rec["ddi-reconciler"]
+
+  bindL <-- "wg0 172.16.0.0/24; conditional<br/>forwarding both directions" --> nva
+  spatium -- "truth" --> rec
+  rec -- "converge" --> pdns
+  rec -- "converge" --> cf
+  gh -- "plan / apply / destroy" --> azure
+  gh -- "plan / apply" --> cf
+  gh -- "nightly drift vs committed snapshot<br/>public edge always, azure edge when the lab exists" --> rec
+```
+
+## Resolution paths
+
+| Client | Query | Path | Answer |
+|---|---|---|---|
+| Spoke VM | `printer.lab.dwsolution.co` | VNet DNS → hub BIND9 → wg0 → laptop BIND9 | on-prem lease IP (10.20.x) |
+| Spoke VM | `db.azure.dwsolution.co` | VNet DNS → hub BIND9 → 168.63.129.16 → Private DNS | 10.10.4.20 |
+| Laptop | `db.azure.dwsolution.co` | Spatium BIND9 conditional forward → wg0 → hub BIND9 → Private DNS | 10.10.4.20 |
+| Laptop (Spatium resolver) | `www.dwsolution.co` | Spatium BIND9 override zone | 10.10.0.10 — internal page, reachable while the tunnel is up |
+| Hub resolver client | `www.dwsolution.co` | hub BIND9 has no `www` zone → recursion | public GitHub Pages addresses (ADR-007: the split horizon is the Spatium resolver's, not the hub's) |
+| Internet | `www.dwsolution.co` | Cloudflare → CNAME → GitHub Pages | public page |
+| Internet | `demo.dwsolution.co` | Cloudflare (reconciler-managed) | CNAME `www.dwsolution.co` |
+
+One caveat this table must not hide: the SpatiumDDI `primary` group holds
+`dwsolution.co.` itself as a primary zone, so a client using the Spatium
+resolver gets an authoritative empty answer for the apex — the production
+Microsoft 365 MX, SPF, and autodiscover records are invisible to it. Public
+resolution is untouched; only lab-resolver clients are affected, and none of
+them may depend on M365 mail discovery until that zone is narrowed.
+
+## Phase 3 data path (proven live)
+
 Phase 3 proved the hybrid data path live on 2026-08-06: SpatiumDDI on the
 laptop and Azure Private DNS behave as one namespace across an encrypted
 WireGuard split tunnel for a bounded window, then everything returns to a
