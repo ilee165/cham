@@ -147,6 +147,17 @@ resource "azurerm_subnet_route_table_association" "spoke" {
 }
 
 # --- Peering, both directions ---
+#
+# Both peerings wait on every write that touches a subnet of THIS VNet, for the
+# same reason the hub's vnet_id/vnet_name outputs wait on the hub's subnets: a
+# subnet write leaves its VNet in `Updating` for some seconds after the subnet
+# resource itself reports success, and a peering referencing a VNet in that
+# state is rejected with `ReferencedResourceNotProvisioned`. Referencing
+# `azurerm_virtual_network.spoke` only creates an edge on the VNet existing.
+#
+# Both directions need it, not just the one that failed: spoke_to_hub is created
+# ON this VNet, and hub_to_spoke names it as the remote. Azure requires both
+# ends to be in Succeeded state.
 resource "azurerm_virtual_network_peering" "spoke_to_hub" {
   name                      = "peer-${var.name}-to-hub"
   resource_group_name       = var.resource_group_name
@@ -156,6 +167,12 @@ resource "azurerm_virtual_network_peering" "spoke_to_hub" {
   allow_virtual_network_access = true
   allow_forwarded_traffic      = true # REQUIRED for on-prem traffic arriving via hub NVA
   use_remote_gateways          = false
+
+  depends_on = [
+    azurerm_subnet.subnets,
+    azurerm_subnet_network_security_group_association.spoke,
+    azurerm_subnet_route_table_association.spoke,
+  ]
 }
 
 resource "azurerm_virtual_network_peering" "hub_to_spoke" {
@@ -167,4 +184,10 @@ resource "azurerm_virtual_network_peering" "hub_to_spoke" {
   allow_virtual_network_access = true
   allow_forwarded_traffic      = true
   allow_gateway_transit        = false
+
+  depends_on = [
+    azurerm_subnet.subnets,
+    azurerm_subnet_network_security_group_association.spoke,
+    azurerm_subnet_route_table_association.spoke,
+  ]
 }
