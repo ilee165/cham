@@ -42,11 +42,11 @@ working tree:
 | # | Proof | Run | Outcome |
 |---|---|---|---|
 | 1 | PR → credential-free gate blocks merge until green; no plan, no cloud call on a PR | PR [#12](https://github.com/ilee165/cham/pull/12), runs [31496365494](https://github.com/ilee165/cham/actions/runs/31496365494) (Terraform) and [31496365506](https://github.com/ilee165/cham/actions/runs/31496365506) (reconciler) | Both required checks green. Both saved-plan jobs **skipped** — `Saved plan from current main` and `Saved Cloudflare plan from current main` never started, so no credential was requested and no cloud call was made. Merge state moved `BLOCKED` → `CLEAN` only after both checks reported. |
-| 2 | Dispatched saved plan → private blob custody → environment-gated apply (lab) | PENDING | — |
-| 3 | Same custody chain for the Cloudflare stack | PENDING | — |
+| 2 | Dispatched saved plan → private blob custody → environment-gated apply (lab) | Plan [31597174733](https://github.com/ilee165/cham/actions/runs/31597174733) → apply [31603340729](https://github.com/ilee165/cham/actions/runs/31603340729) **failed**; re-plan [31604290864](https://github.com/ilee165/cham/actions/runs/31604290864) → apply [31604529524](https://github.com/ilee165/cham/actions/runs/31604529524) succeeded | The pipeline worked on the first attempt and the **Terraform did not**. Every custody step passed — hash verified, plan pulled from the private blob, `environment:lab` OIDC login accepted — and then `terraform apply` hit a genuine provisioning race (see the section below). That is the outcome to want from a first real apply: the gate proved the artifact, and the failure it surfaced was in the thing being applied. Delta re-plan after the fix: `Apply complete! Resources: 12 added, 0 changed, 0 destroyed`, all four peerings `Connected`/`Succeeded`, all three private-DNS links `Succeeded`. |
+| 3 | Same custody chain for the Cloudflare stack | Plan [31596919668](https://github.com/ilee165/cham/actions/runs/31596919668) → apply [31597133904](https://github.com/ilee165/cham/actions/runs/31597133904) | `Apply complete! Resources: 0 added, 0 changed, 0 destroyed` — the stack was already converged, so the chain was proven without mutating a single public record. First and so far only exercise of the `…:environment:cloudflare-prod` subject. Public DNS re-verified byte-identical afterwards, M365 MX included. The environment gate held the run at `waiting` until approved, and the approval prompt named `cloudflare-prod`, not `lab`. |
 | 4 | Drift, green path — converged, silent, no issue | Run [31596160048](https://github.com/ilee165/cham/actions/runs/31596160048), dispatched on `main` at `0dd83cf` | Green and silent. Public edge checked first and credential-free: `[cloudflare-public] converged (0 changes)` / `summary: 0 add, 0 update, 0 delete across 1 edge(s)`. `Report drift` **skipped** — no issue opened, which is the whole point of the green path. Azure edge correctly skipped on an absent zone: the gate step reports `LOGIN: success  ZONE: success  AZURE: skipped`, so the skip was a determinate "the zone is not there", never an assumed `false`. |
-| 5 | Drift, red path — green run plus a labelled issue carrying the diff | PENDING | — |
-| 6 | Two-stage destroy from the Actions UI | PENDING | — |
+| 5 | Drift, red path — green run plus a labelled issue carrying the diff | Runs [31604875749](https://github.com/ilee165/cham/actions/runs/31604875749) and [31605035833](https://github.com/ilee165/cham/actions/runs/31605035833), issue [#14](https://github.com/ilee165/cham/issues/14) | No tamper was staged. A rebuilt lab genuinely lacks the reconciler-owned `app` record, which is the condition ADR-006 predicts, so the red path was exercised by a real finding rather than a synthetic one. Run green, issue raised: `[azure-private] ADD app A 10.10.4.30 ttl=300` beside `[cloudflare-public] converged (0 changes)` — both edges in one issue body. Gate reported `LOGIN: success  ZONE: success  AZURE: success`, so this run also proves the *present* branch of the presence probe that run 4 proved the absent branch of. The second run confirms deduplication: still exactly one open drift issue, which gained a comment instead of a sibling. |
+| 6 | Two-stage destroy from the Actions UI | Plan [31605156142](https://github.com/ilee165/cham/actions/runs/31605156142) → apply [31605336092](https://github.com/ilee165/cham/actions/runs/31605336092) | `Apply complete! Resources: 0 added, 0 changed, 32 destroyed` — the exact inverse of the build. Blast radius checked against the destroy summary before approving: 32 delete lines, zero non-delete lines, and zero occurrences of `tfstate`, `cloudflare`, `bootstrap`, or the state account name; the only resource-group entry is `azurerm_resource_group.lab`. Afterwards `az group exists rg-cham-lab` → `false`, with `rg-cham-tfstate` the only remaining `rg-cham*` group. Public DNS verified unchanged after teardown. |
 
 ## OIDC, first real exercise (2026-08-12)
 
@@ -56,8 +56,15 @@ skipped on every branch run, so a green PR proved nothing about it. Drift run
 [31596160048](https://github.com/ilee165/cham/actions/runs/31596160048) is the
 first run in which GitHub minted a token and Azure accepted it:
 `Azure login (OIDC)` → `Subscription is set successfully.`, under the
-`…:ref:refs/heads/main` subject. The `…:environment:cloudflare-prod` subject
-remains unexercised until run 3.
+`…:ref:refs/heads/main` subject. Runs 3 and 2 then exercised
+`…:environment:cloudflare-prod` and `…:environment:lab` respectively, so three
+of the four configured subjects have now minted a token that Azure accepted.
+
+`…:pull_request` remains unexercised, and on current workflows it cannot be
+reached: the only Azure-touching jobs are the saved-plan jobs, which are
+conditional on a dispatch and skip on pull requests by design. It is a
+credential with no caller — worth either deleting or deliberately keeping for a
+future PR-time plan, but not something a green run will ever validate.
 
 ## Issue hygiene
 
@@ -69,8 +76,70 @@ drift-labelled issue open and comments further findings onto it, so a stale
 open issue would have silently absorbed the next real alert — including the
 red-path evidence in run 5.
 
+Issue #14 was closed the same day for the same reason once the lab was
+destroyed. Its finding was correct when raised and simply ceased to have an
+edge to exist on. The rule this establishes: a drift issue is closed when the
+condition ends, whether that is by reconciling it or by removing the edge —
+never left open as a reminder, because the one open issue is a live channel,
+not a notepad.
+
 ## Custody-chain evidence (run 2/3)
 
-To be captured per the plan's Task 5 Step 2: the blob path, the artifact file
-list, the matching hashes, and the absence of the complete delta from the
-public run log.
+Captured per the plan's Task 5 Step 2. Cloudflare chain shown in full; the lab
+chain has the same shape under `lab/apply/` and `lab/destroy/`.
+
+| Element | Value |
+|---|---|
+| Blob path | `cloudflare/apply/2f39aaf…-31596919668-1/cloudflare.tfplan` |
+| Artifact contents | exactly two files — `cloudflare-plan-manifest.json` (354 B), `cloudflare-plan-summary.txt` (149 B). The plan binary is **not** among them. |
+| Hash in manifest | `aac1316a0d0b2c207345be791c1f57e6afd7cde1bea052cb5fa7de931cdc5d19` |
+| Hash echoed by apply | `APPROVED_SHA256: aac1316a…` — passed as a dispatch input by a human, then matched against the manifest before the plan was fetched |
+| Artifact transfer integrity | `SHA256 digest of downloaded artifact is a6930a78…` matching the expected digest |
+| Summary content | `Changed resources: - none` — enough to review, not enough to reveal |
+
+**Absence of the delta from the public log**, which is the property that matters:
+the plan run's log is 715 lines and the apply run's is 432, and across both,
+these patterns occur zero times — `cloudflare_record`, `will be created`,
+`will be updated`, `will be destroyed`, `~ content`, `ipv4Address`, and the
+string `dwsolution` itself. The complete delta exists only in the private
+storage account. Lab runs behave the same way; the 32-line destroy summary
+names resource *addresses* and no addresses, IPs, or key material.
+
+## The one real defect this phase surfaced
+
+Evidence run 2's first apply ([31603340729](https://github.com/ilee165/cham/actions/runs/31603340729))
+failed creating `peer-app-to-hub`:
+
+```
+ReferencedResourceNotProvisioned: Cannot proceed with operation because resource
+.../virtualNetworks/vnet-hub ... is not in Succeeded state. Resource is in Updating
+state and the last operation that updated/is updating the resource is PutSubnetOperation.
+```
+
+Azure returns a VNet's id and name as soon as the VNet exists, while a subnet
+write leaves the parent VNet in `Updating` for seconds afterwards; a peering
+against a VNet in that state is rejected with a 400, which the provider does
+not retry. Terraform had no edge to order on — the spoke module receives the
+hub VNet as two plain strings, so the graph only knew "the hub VNet exists".
+
+Fixed in PR [#13](https://github.com/ilee165/cham/pull/13) on both sides: the
+hub's `vnet_id`/`vnet_name` outputs now depend on the hub's subnet writes,
+which propagates the wait to every consumer, and both spoke peerings depend on
+the spoke's own subnet writes. The next apply created all four peerings without
+incident.
+
+Worth recording as a phase outcome rather than a footnote: this was the second
+occurrence — the same error took down Checkpoint B on 2026-08-03 and was worked
+around by re-applying. It is timing-dependent, so a retry usually succeeds,
+which is exactly how it survived to fail again. A CI pipeline that applies a
+reviewed plan is what turned it from an annoyance into something with a run URL
+attached.
+
+## Cost
+
+The lab existed for roughly 90 minutes across evidence runs 2 and 6, with all
+cost-bearing options off (`enable_test_vm_*`, `enable_test_nic_*`,
+`enable_private_resolver` all `false`) — one hub VM instead of the Phase 4
+shape's three. Prorated against the ~$10–12/mo figure, the whole exercise cost
+cents. Billing is back to zero: the only surviving resource group is the state
+backend.
