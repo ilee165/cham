@@ -11,8 +11,8 @@ not happen.
 |---|---|---|
 | Repo slug | `ilee165/cham` | `gh repo view --json nameWithOwner` |
 | `lab` environment | exists, required reviewer `ilee165`, branch policy | `gh api repos/ilee165/cham/environments/lab` |
-| Federated credentials | 3 subjects, ID-embedded form (`repo:ilee165@140726424/cham@1318631051:{ref:refs/heads/main,pull_request,environment:lab}`); prefix re-confirmed 2026-08-11 | `az ad app federated-credential list`, `gh api .../actions/oidc/customization/sub` |
-| 4th credential for `…:environment:cloudflare-prod` | PENDING — required, because a job declaring an environment presents that environment's subject, not the branch subject. Re-confirmed absent 2026-08-11: the app carries exactly the three subjects above, so the Cloudflare apply job would fail `AADSTS700213` at its `azure/login@v2` step | `az ad app federated-credential list` |
+| Federated credentials | 4 subjects, ID-embedded form (`repo:ilee165@140726424/cham@1318631051:{ref:refs/heads/main,pull_request,environment:lab,environment:cloudflare-prod}`); prefix re-confirmed 2026-08-12 | `az ad app federated-credential list`, `gh api .../actions/oidc/customization/sub` |
+| 4th credential for `…:environment:cloudflare-prod` | created 2026-08-12 as `cham-cloudflare-prod`. Required because a job declaring an environment presents that environment's subject, not the branch subject — without it the Cloudflare apply job fails `AADSTS700213` at `azure/login@v2` and never reaches its own remote state. Verified by case-sensitive comparison, not by eye: the stored subject equals the live `sub_claim_prefix` concatenated with `:environment:cloudflare-prod`, and issuer and audience match exactly | `az ad app federated-credential list` compared against `gh api .../actions/oidc/customization/sub` |
 | RBAC | Contributor at subscription scope + Storage Blob Data Contributor on the state account | Phase 4 configuration, unchanged |
 | Repository secrets | 9 (3 OIDC identifiers, 4 lab config, 2 Cloudflare tokens) | `gh secret list` |
 | `BUDGET_START_DATE` variable | `2026-08-01T00:00:00Z` | `gh variable list` |
