@@ -11,7 +11,7 @@ not happen.
 |---|---|---|
 | Repo slug | `ilee165/cham` | `gh repo view --json nameWithOwner` |
 | `lab` environment | exists, required reviewer `ilee165`, branch policy | `gh api repos/ilee165/cham/environments/lab` |
-| Federated credentials | 4 subjects, ID-embedded form (`repo:ilee165@140726424/cham@1318631051:{ref:refs/heads/main,pull_request,environment:lab,environment:cloudflare-prod}`); prefix re-confirmed 2026-08-12 | `az ad app federated-credential list`, `gh api .../actions/oidc/customization/sub` |
+| Federated credentials | 3 subjects, ID-embedded form (`repo:ilee165@140726424/cham@1318631051:{ref:refs/heads/main,environment:lab,environment:cloudflare-prod}`); prefix re-confirmed 2026-08-12. Each has a caller and a run URL proving it works; the `pull_request` subject was deleted the same day for having neither | `az ad app federated-credential list`, `gh api .../actions/oidc/customization/sub` |
 | 4th credential for `…:environment:cloudflare-prod` | created 2026-08-12 as `cham-cloudflare-prod`. Required because a job declaring an environment presents that environment's subject, not the branch subject — without it the Cloudflare apply job fails `AADSTS700213` at `azure/login@v2` and never reaches its own remote state. Verified by case-sensitive comparison, not by eye: the stored subject equals the live `sub_claim_prefix` concatenated with `:environment:cloudflare-prod`, and issuer and audience match exactly | `az ad app federated-credential list` compared against `gh api .../actions/oidc/customization/sub` |
 | RBAC | Contributor at subscription scope + Storage Blob Data Contributor on the state account | Phase 4 configuration, unchanged |
 | Repository secrets | 9 (3 OIDC identifiers, 4 lab config, 2 Cloudflare tokens) | `gh secret list` |
@@ -60,11 +60,19 @@ first run in which GitHub minted a token and Azure accepted it:
 `…:environment:cloudflare-prod` and `…:environment:lab` respectively, so three
 of the four configured subjects have now minted a token that Azure accepted.
 
-`…:pull_request` remains unexercised, and on current workflows it cannot be
-reached: the only Azure-touching jobs are the saved-plan jobs, which are
-conditional on a dispatch and skip on pull requests by design. It is a
-credential with no caller — worth either deleting or deliberately keeping for a
-future PR-time plan, but not something a green run will ever validate.
+The fourth, `…:pull_request`, was **deleted 2026-08-12** rather than left
+configured. It had no caller and could not acquire one by accident: both
+`id-token: write` jobs in `plan.yml` are gated
+`if: github.event_name == 'workflow_dispatch'`, and the only other
+PR-triggered workflow, `reconciler-tests.yml`, deliberately grants no
+`id-token` at all. Nothing in the repository could present that subject, so no
+green run would ever have validated it — and a standing trust relationship
+that nobody exercises is one whose breakage, or whose misuse, goes unnoticed.
+Deleting it means every remaining credential has a caller and a run URL
+proving it works.
+
+Reversible in one command if a PR-time plan is ever wanted; the credential is
+three fields and a subject, and the subject is recorded above.
 
 ## Issue hygiene
 
