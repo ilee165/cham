@@ -12,14 +12,14 @@ not happen.
 | Repo slug | `ilee165/cham` | `gh repo view --json nameWithOwner` |
 | `lab` environment | exists, required reviewer `ilee165`, branch policy | `gh api repos/ilee165/cham/environments/lab` |
 | Federated credentials | 3 subjects, ID-embedded form (`repo:ilee165@140726424/cham@1318631051:{ref:refs/heads/main,pull_request,environment:lab}`); prefix re-confirmed 2026-08-11 | `az ad app federated-credential list`, `gh api .../actions/oidc/customization/sub` |
-| 4th credential for `…:environment:cloudflare-prod` | PENDING — required, because a job declaring an environment presents that environment's subject, not the branch subject | — |
+| 4th credential for `…:environment:cloudflare-prod` | PENDING — required, because a job declaring an environment presents that environment's subject, not the branch subject. Re-confirmed absent 2026-08-11: the app carries exactly the three subjects above, so the Cloudflare apply job would fail `AADSTS700213` at its `azure/login@v2` step | `az ad app federated-credential list` |
 | RBAC | Contributor at subscription scope + Storage Blob Data Contributor on the state account | Phase 4 configuration, unchanged |
 | Repository secrets | 9 (3 OIDC identifiers, 4 lab config, 2 Cloudflare tokens) | `gh secret list` |
 | `BUDGET_START_DATE` variable | `2026-08-01T00:00:00Z` | `gh variable list` |
 | Lab resource group | absent (destroyed after Phase 4) | `az group exists --name rg-cham-lab` → `false` |
 | Branch protection on `main` | strict, requires `Credential-free Terraform checks` + `tests` | `gh api .../branches/main/protection` |
 | `CLOUDFLARE_API_TOKEN` out of the repository scope | yes — repository level holds `CLOUDFLARE_API_TOKEN_RO` alone | `gh secret list` / `gh secret list --env lab` |
-| `cloudflare-prod` environment holding the edit token | PENDING — the 2026-08-11 review found `lab` also gates `destroy.yml`, so the token must move to its own environment | — |
+| `cloudflare-prod` environment holding the edit token | exists (verified 2026-08-11) — protection rules `required_reviewers` + `branch_policy`, custom branch policy naming `main` and nothing else, environment secret `CLOUDFLARE_API_TOKEN`. Both assertions `apply.yml` makes at job start therefore hold. The `lab` environment carries no secrets, so the edit token is no longer inside `destroy.yml`'s approval scope | `gh api repos/ilee165/cham/environments/cloudflare-prod`, `.../environments/cloudflare-prod/{secrets,deployment-branch-policies}` |
 | Bootstrap `tfplans/` expiry policy applied | rule `expire-saved-plans`, prefix `tfplans/`, 7 days for base blobs and versions | `az storage account management-policy show` |
 
 ## Local gate re-run before execution (2026-08-10)
