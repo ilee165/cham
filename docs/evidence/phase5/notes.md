@@ -44,9 +44,30 @@ working tree:
 | 1 | PR → credential-free gate blocks merge until green; no plan, no cloud call on a PR | PR [#12](https://github.com/ilee165/cham/pull/12), runs [31496365494](https://github.com/ilee165/cham/actions/runs/31496365494) (Terraform) and [31496365506](https://github.com/ilee165/cham/actions/runs/31496365506) (reconciler) | Both required checks green. Both saved-plan jobs **skipped** — `Saved plan from current main` and `Saved Cloudflare plan from current main` never started, so no credential was requested and no cloud call was made. Merge state moved `BLOCKED` → `CLEAN` only after both checks reported. |
 | 2 | Dispatched saved plan → private blob custody → environment-gated apply (lab) | PENDING | — |
 | 3 | Same custody chain for the Cloudflare stack | PENDING | — |
-| 4 | Drift, green path — converged, silent, no issue | PENDING | — |
+| 4 | Drift, green path — converged, silent, no issue | Run [31596160048](https://github.com/ilee165/cham/actions/runs/31596160048), dispatched on `main` at `0dd83cf` | Green and silent. Public edge checked first and credential-free: `[cloudflare-public] converged (0 changes)` / `summary: 0 add, 0 update, 0 delete across 1 edge(s)`. `Report drift` **skipped** — no issue opened, which is the whole point of the green path. Azure edge correctly skipped on an absent zone: the gate step reports `LOGIN: success  ZONE: success  AZURE: skipped`, so the skip was a determinate "the zone is not there", never an assumed `false`. |
 | 5 | Drift, red path — green run plus a labelled issue carrying the diff | PENDING | — |
 | 6 | Two-stage destroy from the Actions UI | PENDING | — |
+
+## OIDC, first real exercise (2026-08-12)
+
+The federation was configured 2026-08-06 and, as noted at the time, never
+actually exercised — `plan.yml`'s Azure-touching job is conditional and was
+skipped on every branch run, so a green PR proved nothing about it. Drift run
+[31596160048](https://github.com/ilee165/cham/actions/runs/31596160048) is the
+first run in which GitHub minted a token and Azure accepted it:
+`Azure login (OIDC)` → `Subscription is set successfully.`, under the
+`…:ref:refs/heads/main` subject. The `…:environment:cloudflare-prod` subject
+remains unexercised until run 3.
+
+## Issue hygiene
+
+Issue #6 (`DNS drift detected — 2026-08-08`) was closed 2026-08-12. It was
+raised by the 06:46Z cron carrying the two ADDs that Phase 4 task C2 applied
+later the same day, so it had been resolved for four days and merely left
+open. Closing it is not cosmetic: the Phase 5 workflow keeps exactly one
+drift-labelled issue open and comments further findings onto it, so a stale
+open issue would have silently absorbed the next real alert — including the
+red-path evidence in run 5.
 
 ## Custody-chain evidence (run 2/3)
 
