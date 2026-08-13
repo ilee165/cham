@@ -16,7 +16,7 @@ import json
 import pytest
 
 from ddi_reconciler import cli
-from ddi_reconciler.desired_file import _checksum
+from ddi_reconciler.desired_file import SNAPSHOT_VERSION, _checksum
 from ddi_reconciler.model import CanonicalRecord
 
 AZURE_ZONE = "azure.dwsolution.co"
@@ -81,8 +81,8 @@ def two_edges(tmp_path):
     entries = [APP, DEMO]
     desired = tmp_path / "desired.json"
     desired.write_text(json.dumps({
-        "version": 1, "truth_verified": True, "count": len(entries),
-        "checksum": _checksum(entries), "records": entries}))
+        "version": SNAPSHOT_VERSION, "truth_verified": True, "count": len(entries),
+        "checksum": _checksum(entries, truth_verified=True), "records": entries}))
     return config, desired
 
 

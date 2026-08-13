@@ -12,7 +12,9 @@ import responses
 
 from ddi_reconciler.providers.spatium import SpatiumProvider
 
-BASE = "http://spatium.test"
+# https, because CR-03 made the provider refuse a token over non-loopback
+# plaintext http at construction — which the old http://spatium.test was.
+BASE = "https://spatium.test"
 # Opaque ids: the live API issues uuids, and nothing in the adapter may depend
 # on their shape.
 GID = "fbb26dd5-520b-48df-9cca-90d623623a0a"
@@ -573,24 +575,125 @@ def test_unreadable_truth_record_is_named_and_fatal():
     assert "test.zone/broken/A" in str(exc.value)
 
 
-# --- IN-2: plaintext bearer token ------------------------------------------
+# --- CR-03: plaintext bearer token is refused, not warned about ------------
 
-def test_plaintext_non_loopback_base_url_warns(capsys):
-    SpatiumProvider("http://spatium.internal:8000", token="sekrit")
-    assert "plaintext" in capsys.readouterr().err
+def test_plaintext_non_loopback_base_url_with_token_refuses():
+    """The old behavior warned and proceeded, which transmitted the credential
+    in cleartext on every request anyway. Refusal must happen at construction,
+    before the token ever reaches a session header."""
+    with pytest.raises(RuntimeError, match="plaintext http to a non-loopback"):
+        SpatiumProvider("http://spatium.internal:8000", token="sekrit")
+
+
+def test_refusal_names_no_override_flag():
+    """The message must not advertise an escape hatch — there is none."""
+    with pytest.raises(RuntimeError) as exc:
+        SpatiumProvider("http://spatium.internal:8000", token="sekrit")
+    message = str(exc.value)
+    assert "allow" not in message.lower()
+    assert "https://" in message
 
 
 @pytest.mark.parametrize("base_url", [
-    "http://localhost:8000",     # the documented lab setup must stay quiet
+    "http://localhost:8000",     # the documented lab setup must keep working
     "http://127.0.0.1:8000",
     "http://[::1]:8000",
     "https://spatium.example",
 ])
-def test_loopback_or_tls_base_url_does_not_warn(base_url, capsys):
-    SpatiumProvider(base_url, token="sekrit")
+def test_loopback_or_tls_base_url_constructs_with_token(base_url, capsys):
+    provider = SpatiumProvider(base_url, token="sekrit")
+    assert provider._session.headers["Authorization"] == "Bearer sekrit"
     assert capsys.readouterr().err == ""
 
 
 def test_no_token_means_nothing_to_leak(capsys):
-    SpatiumProvider("http://spatium.internal:8000", token="")
+    """Tokenless plaintext is allowed — there is no credential on the wire."""
+    provider = SpatiumProvider("http://spatium.internal:8000", token="")
+    assert "Authorization" not in provider._session.headers
     assert capsys.readouterr().err == ""
+
+
+# --- CR-02: malformed pagination metadata must not certify a read ------------
+
+@responses.activate
+def test_fractional_total_does_not_certify_a_partial_read():
+    """The review's exact reproduction: total 1.9 used to truncate to 1, match
+    the single returned record, and certify a partial read of the source of
+    truth as complete — which downstream is deletion authority."""
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a")], "total": 1.9,
+                                 "page": 1, "page_size": 100})
+    provider = SpatiumProvider(BASE, token="t")
+    records = provider.fetch_desired({"test.zone"})
+    assert [r.name for r in records] == ["a"]  # the read itself still lands
+    assert provider.read_verified is False     # but it certifies nothing
+
+
+@responses.activate
+def test_a_malformed_total_is_not_rescued_by_a_valid_alias():
+    """{"total": 1.9, "count": 1}: 'count' is a recognized total alias and is
+    clean, but a body whose recognized metadata is malformed anywhere is a
+    body whose metadata cannot be vouched for at all — the valid alias must
+    not restore verification."""
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a")], "total": 1.9, "count": 1,
+                                 "page": 1, "page_size": 100})
+    provider = SpatiumProvider(BASE, token="t")
+    provider.fetch_desired({"test.zone"})
+    assert provider.read_verified is False
+
+
+@responses.activate
+def test_a_malformed_page_one_total_latches_across_later_valid_pages():
+    """Malformation LATCHES: a clean total on page 2 says nothing about the
+    page whose metadata already proved unreliable."""
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a")], "total": "1e3",
+                                 "next": f"{RECORDS}?page=2"})
+    responses.get(RECORDS, json={"items": [rec("b", "10.0.0.2")], "total": 2,
+                                 "next": None})
+    provider = SpatiumProvider(BASE, token="t")
+    records = provider.fetch_desired({"test.zone"})
+    assert {r.name for r in records} == {"a", "b"}  # walk completed, count even matches
+    assert provider.read_verified is False          # and still certifies nothing
+
+
+@responses.activate
+@pytest.mark.parametrize("bad_total", [1.9, -1, "1e3", "1.9", "01", 2.0, True],
+                         ids=["fractional", "negative", "exponent-string",
+                              "decimal-string", "leading-zero", "integral-float",
+                              "boolean"])
+def test_non_canonical_totals_leave_the_read_unverified(bad_total):
+    """Only a non-bool int >= 0 or a canonical ASCII integer string counts.
+    int() truncation, int(True) == 1, and int("01") == 1 are all silent
+    coercions that let malformed metadata masquerade as a matched total."""
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a")], "total": bad_total,
+                                 "page": 1, "page_size": 100})
+    provider = SpatiumProvider(BASE, token="t")
+    provider.fetch_desired({"test.zone"})
+    assert provider.read_verified is False
+
+
+@responses.activate
+def test_a_canonical_string_total_still_verifies():
+    """Strictness must not break servers that stringify their integers."""
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a")], "total": "1",
+                                 "page": 1, "page_size": 100})
+    provider = SpatiumProvider(BASE, token="t")
+    provider.fetch_desired({"test.zone"})
+    assert provider.read_verified is True
+
+
+@responses.activate
+def test_malformed_page_metadata_taints_even_with_a_clean_total():
+    """The latch covers every recognized field, not just totals: a page number
+    that cannot be parsed exactly means the walk's own navigation metadata is
+    suspect, and navigation is part of what 'complete' rests on."""
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a")], "total": 1,
+                                 "page": "one", "page_size": 100})
+    provider = SpatiumProvider(BASE, token="t")
+    provider.fetch_desired({"test.zone"})
+    assert provider.read_verified is False

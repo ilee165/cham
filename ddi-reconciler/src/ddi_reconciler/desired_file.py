@@ -46,7 +46,13 @@ from ddi_reconciler.model import CanonicalRecord
 
 _REQUIRED_FIELDS = ("zone", "name", "rtype", "values", "ttl")
 _STRING_FIELDS = ("zone", "name", "rtype")
-SNAPSHOT_VERSION = 1
+# v2 (REVIEW.md CR-01): the checksum binds version + truth_verified + count +
+# records, so the deletion-authority flag can no longer be flipped on a
+# checksum-clean file. v1 snapshots (records-only hash) are hard-rejected by
+# the version check with a "re-export it" message — migration is a re-export
+# to a sibling path, verified, then moved over the tracked file; never
+# --allow-snapshot-shrink, which authorizes record loss, not format changes.
+SNAPSHOT_VERSION = 2
 
 
 class SnapshotError(RuntimeError):
@@ -71,14 +77,28 @@ def _payload(records: list[CanonicalRecord]) -> list[dict]:
     ]
 
 
-def _checksum(payload: list[dict]) -> str:
-    """Content hash of the records array alone.
+def _checksum(payload: list[dict], *, truth_verified: bool) -> str:
+    """Content hash binding the records array AND the fields that give it
+    authority (REVIEW.md CR-01).
 
-    Keyed on the records, not the whole envelope, so it stays stable if the
-    envelope gains a field. Separators and key order are pinned because the
-    hash must not depend on json.dumps' formatting defaults.
+    v1 hashed the records alone, so flipping `truth_verified` from false to
+    true left a checksum-clean file — and that flag is precisely what
+    authorizes deletion downstream (`load_desired(...).verified` feeds the
+    runner's UnverifiedTruthError gate). The hash input is now a canonical
+    envelope object carrying `version`, `truth_verified`, `count`, and
+    `records`, so no integrity-relevant field can change independently of the
+    checksum. The checksum field itself stays out of its own input.
+
+    Separators and key order are pinned because the hash must not depend on
+    json.dumps' formatting defaults.
     """
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    bound = {
+        "version": SNAPSHOT_VERSION,
+        "truth_verified": truth_verified,
+        "count": len(payload),
+        "records": payload,
+    }
+    canonical = json.dumps(bound, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -146,17 +166,22 @@ def _verify_envelope(body: dict) -> None:
         raise ValueError(
             f"it declares {count} record(s) but carries {len(records)}; a snapshot that "
             "disagrees with its own count is truncated or hand-edited, not a smaller truth")
+    # truth_verified is validated BEFORE the checksum because its value
+    # participates in the hash (CR-01): a checksum computed over a wrong-typed
+    # flag would produce a confusing mismatch message instead of naming the
+    # actual defect.
+    truth_verified = body.get("truth_verified")
+    if not isinstance(truth_verified, bool):
+        raise ValueError("'truth_verified' is missing or is not a boolean")
     checksum = body.get("checksum")
     if not isinstance(checksum, str):
         raise ValueError("'checksum' is missing or is not a string")
-    actual = _checksum(records)
+    actual = _checksum(records, truth_verified=truth_verified)
     if checksum != actual:
         raise ValueError(
-            f"its checksum {checksum} does not match its records ({actual}); the file was "
-            "edited without re-exporting it")
-    truth_verified = body.get("truth_verified", False)
-    if not isinstance(truth_verified, bool):
-        raise ValueError("'truth_verified' is not a boolean")
+            f"its checksum {checksum} does not match its integrity-bound fields ({actual}); "
+            "the file was edited without re-exporting it — this includes flipping "
+            "'truth_verified', which is deletion authority and is bound into the hash")
 
 
 def save_desired(records: list[CanonicalRecord], path: Path, *,
@@ -189,7 +214,7 @@ def save_desired(records: list[CanonicalRecord], path: Path, *,
         "version": SNAPSHOT_VERSION,
         "truth_verified": truth_verified,
         "count": len(payload),
-        "checksum": _checksum(payload),
+        "checksum": _checksum(payload, truth_verified=truth_verified),
         "records": payload,
     }
     # Write-then-rename: an interrupted write (Ctrl-C, disk full) must not

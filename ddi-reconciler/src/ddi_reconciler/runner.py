@@ -51,6 +51,22 @@ class UnwritableKeyError(RuntimeError):
     """A managed key exists at the edge but the provider refuses to write it."""
 
 
+class TypeConflictError(RuntimeError):
+    """A record-type transition (or CNAME coexistence) that cannot converge.
+
+    REVIEW.md CR-04: DNS forbids a CNAME beside any other type at one owner
+    name, and both providers enforce it — Cloudflare rejects the POST with
+    81053, Azure rejects the PUT. Record identity includes the type, so a
+    CNAME→A change is an ADD of one key plus a DELETE of another, and
+    create-before-delete apply orders mean the create is rejected while the
+    old record still stands; if the old type is not even allowlisted, its
+    DELETE can never be planned at all. Either way the edge cannot converge
+    autonomously, so the runner refuses up front — in dry-run too, because
+    reporting an unconvergeable edge as ordinary drift (exit 2) would tell
+    the nightly a heal is possible when it is not.
+    """
+
+
 @dataclass(frozen=True)
 class EdgeResult:
     edge: EdgeConfig
@@ -144,6 +160,57 @@ def _partition_desired(
     return managed, dropped, near_misses
 
 
+_MANUAL_TRANSITION = (
+    "A type transition is a manual, two-session procedure: temporarily manage "
+    "only the old type (managed_keys carries the old key alone) and reconcile "
+    "its deletion; then manage only the new type and reconcile its creation.")
+
+
+def _check_type_conflicts(edge: EdgeConfig, desired: list[CanonicalRecord],
+                          observed_keys: set[RecordKey]) -> None:
+    """Refuse CNAME-vs-anything coexistence at one owner name (CR-04).
+
+    Two sources of conflict, checked against each other and themselves:
+
+    * desired-vs-desired — truth carries a CNAME and a non-CNAME at the same
+      owner. No edge involvement needed; whichever lands first, the second
+      write is rejected, so the plan is unappliable as written.
+    * desired-vs-observed — a desired record's owner name already carries a
+      different type at the edge where either side is a CNAME. "Observed" is
+      every key the provider saw, not just the records in `actual`: a record
+      the provider excluded as blocked (Azure VM auto-registration) or
+      unparseable is still physically present at the edge and still collides.
+    """
+    by_owner: dict[tuple[str, str], set[str]] = {}
+    for record in desired:
+        by_owner.setdefault((record.zone, record.name), set()).add(record.rtype)
+    truth_conflicts = sorted(
+        f"{zone}/{name}: truth carries {' and '.join(sorted(rtypes))}"
+        for (zone, name), rtypes in by_owner.items()
+        if len(rtypes) > 1 and "CNAME" in rtypes)
+
+    observed_by_owner: dict[tuple[str, str], set[str]] = {}
+    for zone, name, rtype in observed_keys:
+        observed_by_owner.setdefault((zone, name), set()).add(rtype)
+    edge_conflicts = sorted(
+        f"{record.zone}/{record.name}: desired {record.rtype} vs edge "
+        f"{' and '.join(sorted(others))}"
+        for record in desired
+        for others in [
+            {rtype for rtype in observed_by_owner.get((record.zone, record.name), set())
+             if rtype != record.rtype and ("CNAME" in (rtype, record.rtype))}
+        ]
+        if others)
+
+    conflicts = truth_conflicts + edge_conflicts
+    if conflicts:
+        raise TypeConflictError(
+            f"edge {edge.name!r}: record-type conflict(s) at owner name(s) that cannot "
+            f"converge — {'; '.join(conflicts)}. A CNAME cannot coexist with any other "
+            "type at one name, and create-before-delete ordering (or an unmanaged old "
+            f"type) makes the transition unappliable. {_MANUAL_TRANSITION}")
+
+
 def _force_updates(diff: Diff, keys: tuple[RecordKey, ...],
                    desired: list[CanonicalRecord],
                    actual: list[CanonicalRecord]) -> None:
@@ -198,6 +265,16 @@ def plan_edge(edge: EdgeConfig, desired_all: list[CanonicalRecord], provider,
             "state, which deletes the live record; fix the zone/name split in truth.")
 
     actual = provider.fetch_actual({edge.zone})
+
+    # CR-04 preflight, before anything is planned: a CNAME-vs-other-type
+    # collision at one owner name can never be applied, whichever way the
+    # allowlist is configured. Observed keys include what the provider read
+    # AND what it excluded from `actual` as blocked or unparseable — those
+    # records are still physically at the edge and still collide.
+    observed_keys = ({record.key for record in actual}
+                     | set(getattr(provider, "blocked_keys", ()))
+                     | set(getattr(provider, "unparseable_keys", ())))
+    _check_type_conflicts(edge, desired, observed_keys)
 
     # Keys the provider read but will not write: Azure VM auto-registration owns
     # them, or their record set could not be read. Either way they are absent

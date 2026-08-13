@@ -1,8 +1,8 @@
 {
-  "version": 1,
+  "version": 2,
   "truth_verified": true,
   "count": 3,
-  "checksum": "sha256:5e8e62ff50f30b648a11a20df26165ad907d69e03645f55840cbd5a008e0fb29",
+  "checksum": "sha256:c17f43425a36a27b9b13351033c5aea0a3652b4bb966b5796e18f1586bb8aef0",
   "records": [
     {
       "zone": "azure.dwsolution.co",

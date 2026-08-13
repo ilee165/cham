@@ -52,9 +52,21 @@ def load_config(path: Path) -> Config:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"invalid TOML in {path}: {exc}") from exc
 
+    # WR-01: schema-check the top-level collections before touching them.
+    # Valid TOML like `spatium = "bad"` used to reach `.get()` on a string and
+    # escape as an AttributeError traceback instead of the exit-1 contract.
+    raw_edges = raw.get("edges", [])
+    if not isinstance(raw_edges, list):
+        raise ConfigError(
+            f"'edges' must be an array of tables, got {type(raw_edges).__name__}")
+    for section in ("spatium", "azure"):
+        if section in raw and not isinstance(raw[section], dict):
+            raise ConfigError(
+                f"[{section}] must be a table, got {type(raw[section]).__name__}")
+
     edges: list[EdgeConfig] = []
     seen_names: set[str] = set()
-    for entry in raw.get("edges", []):
+    for entry in raw_edges:
         if not isinstance(entry, dict):
             raise ConfigError(f"invalid edge entry {entry!r}: expected a table")
         name = _require_str(entry, "name")
@@ -106,8 +118,15 @@ def load_config(path: Path) -> Config:
     if not edges:
         raise ConfigError("config declares no edges")
 
+    def _provider_str(section: str, field: str, default: str) -> str:
+        value = raw.get(section, {}).get(field, default)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(
+                f"[{section}] {field!r} must be a non-empty string, got {value!r}")
+        return value.strip()
+
     return Config(
-        spatium_base_url=raw.get("spatium", {}).get("base_url", "http://localhost:8000"),
-        azure_resource_group=raw.get("azure", {}).get("resource_group", "rg-cham-lab"),
+        spatium_base_url=_provider_str("spatium", "base_url", "http://localhost:8000"),
+        azure_resource_group=_provider_str("azure", "resource_group", "rg-cham-lab"),
         edges=tuple(edges),
     )
