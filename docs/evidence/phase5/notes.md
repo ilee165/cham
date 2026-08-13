@@ -143,6 +143,50 @@ which is exactly how it survived to fail again. A CI pipeline that applies a
 reviewed plan is what turned it from an annoyance into something with a run URL
 attached.
 
+## Phase 4 carry-forward items closed locally (2026-08-13, Task 7)
+
+Two of the five carried-forward items were free and needed only the local
+SpatiumDDI stack. Both done, both verified by measurement.
+
+**Issue #9 — `demo` CNAME trailing dot, fixed on the truth side.**
+`PUT {"value": "www.dwsolution.co."}` on the Spatium record. The three
+predictions made when the issue was opened all measured true:
+
+| Prediction | Measured |
+|---|---|
+| Internal BIND9 renders absolute | before: `www.dwsolution.co.dwsolution.co.` → after: `www.dwsolution.co.` (`dig -p 1053 @127.0.0.1`) |
+| Zero edge churn | `cham-reconcile --dry-run --edge cloudflare-public` → `converged (0 changes)`, exit 0 |
+| Snapshot unchanged | `--export desired-records.json` → byte-identical to the committed file |
+
+**Apex-zone M365 shadow — resolved by scoping, not mirroring (ADR-008).**
+The `dwsolution.co` truth zone moved to a new serverless `truth-only` group;
+the lab resolver stopped serving the apex and now recurses for it. Measured
+after the move, all through `dig -p 1053 @127.0.0.1`:
+
+| Query | Before | After |
+|---|---|---|
+| `dwsolution.co MX` | NODATA (authoritative empty) | `0 dwsolution-co.mail.protection.outlook.com.` |
+| `dwsolution.co TXT` | NODATA | `MS=…` verification + production SPF |
+| `autodiscover.dwsolution.co` | NXDOMAIN | `autodiscover.outlook.com.` |
+| `www.dwsolution.co A` | `10.10.0.10` | `10.10.0.10` — override zone untouched |
+| `app.azure.dwsolution.co A` | `10.10.4.30` | `10.10.4.30` — served zones untouched |
+
+The autodiscover row is the reason scoping beat mirroring: it proves the fix
+covers the *class* of M365 names, not an enumerated list. Reconciler truth was
+unaffected because `fetch_desired` walks every group and filters zones by
+name — dry-run converged and the snapshot re-export was byte-identical, which
+also means the nightly drift job needed no snapshot commit for either item.
+
+One operational rule came out of the move, recorded in ADR-008: a zone must
+never exist in two groups while the reconciler runs (`fetch_desired` merges
+groups into one RRset, doubling every value), so a zone move is always
+create → verify → delete with no reconciler invocation inside the window.
+
+Remaining Task 7 items: ADR-007 resolver unification and the WireGuard
+operator step (both need the lab up — natural pairing for one session), and
+the quality-gate re-run confirmation (arguably satisfied by the 2026-08-10
+gate re-run; needs a written verdict, not new work).
+
 ## Cost
 
 The lab existed for roughly 90 minutes across evidence runs 2 and 6, with all

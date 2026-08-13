@@ -126,3 +126,40 @@ interview material as much as documentation.
   needs the resolver named. Evidence in
   `docs/evidence/phase4/split-horizon.txt` states which resolver was queried
   for every measurement.
+
+## ADR-008: Truth-only zones live in a serverless DNS group, not on the lab resolver
+- **Context:** The `dwsolution.co` apex zone existed in SpatiumDDI solely as
+  reconciler truth for the two public-edge managed records (`demo`,
+  `reconciler-check`). But SpatiumDDI renders every zone in a group onto that
+  group's servers, so the lab BIND9 also *served* the apex zone — answering
+  authoritatively-empty for every other name under it. Lab-resolver clients
+  got NODATA for the production M365 MX/SPF and NXDOMAIN for
+  `autodiscover` — mail discovery silently broken for anyone using the lab
+  resolver (recorded in Phase 4's A4 notes; carried into Phase 5 as Task 7).
+- **Decision:** Scope the serving narrower rather than mirror the M365
+  records. The zone moved (2026-08-13) to a new `truth-only` group that no
+  DNS server will ever join, so nothing in it is rendered anywhere. The
+  control plane keeps truth; the resolver recurses for everything under
+  `dwsolution.co` it does not specifically serve. This works because the
+  reconciler's truth fetch walks *all* groups and filters zones by name
+  (`spatium.py fetch_desired`) — verified live: dry-run converged and the
+  exported snapshot was byte-identical after the move.
+- **Why not mirror:** copying MX/SPF/autodiscover into the lab zone fixes
+  only the names enumerated, leaves `enterpriseregistration`, DKIM
+  selectors, and every future M365 endpoint broken, and each copy drifts
+  silently when Microsoft rotates values. Removing the shadow fixes the
+  whole class; measured afterwards, the lab resolver returns the production
+  MX, SPF (including the `MS=` verification TXT), and
+  `autodiscover.outlook.com.` while `www` still answers `10.10.0.10` from
+  the override zone.
+- **Operational constraint discovered en route:** a zone may NOT exist in
+  two groups while the reconciler runs — `fetch_desired` merges records
+  from every group into one RRset keyed by `(zone, name, type)`, so a
+  duplicated zone doubles every value. Zone moves are create → verify →
+  delete with no reconciler invocation inside the window. (`ZoneUpdate`
+  has no group field, so a move is always a re-create.)
+- **Tradeoff accepted:** internal resolution of the public managed names
+  (`demo`, `reconciler-check`) now depends on recursion and internet
+  reachability instead of a local authoritative answer — acceptable because
+  they are public names whose canonical home is the public edge, and a lab
+  cut off from the internet has bigger problems than those two records.
