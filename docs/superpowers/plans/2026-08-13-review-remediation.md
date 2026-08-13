@@ -45,7 +45,7 @@ pushes).
 
 Branch: `fix/review-reconciler`. All Python, all locally verifiable.
 
-- [ ] **A1 (CR-01): bind `truth_verified` into the snapshot hash.**
+- [x] **A1 (CR-01): bind `truth_verified` into the snapshot hash.**
   `desired_file.py`: bump `SNAPSHOT_VERSION` 1→2. `_checksum()` hashes the
   canonical object `{"version", "truth_verified", "count", "records"}` (checksum
   field excluded from its own input). `_verify_envelope()` validates
@@ -56,7 +56,7 @@ Branch: `fix/review-reconciler`. All Python, all locally verifiable.
   Regression tests: (1) flip only `truth_verified` in a checksum-clean v2 file →
   load fails; (2) v1 envelope → load fails naming re-export; (3) round-trip
   save→load preserves `verified=True/False`.
-- [ ] **A2 (CR-01): migrate the committed snapshot via a sibling path.**
+- [x] **A2 (CR-01): migrate the committed snapshot via a sibling path.**
   An in-place `--export` onto the v1 file fails: `_prior_count()` validates the
   existing file with `_verify_envelope`, which now rejects version 1.
   `--allow-snapshot-shrink` is NOT the migration path — it exists to authorize
@@ -65,7 +65,7 @@ Branch: `fix/review-reconciler`. All Python, all locally verifiable.
   assert on the result that `version == 2`, `truth_verified == true`, and the
   records array is value-identical to the committed v1 records, then replace
   the tracked file with the verified export. Same commit as the code.
-- [ ] **A3 (CR-02): strict, latching pagination-integer parsing.**
+- [x] **A3 (CR-02): strict, latching pagination-integer parsing.**
   `spatium.py`: a declared integer field is valid only as a non-bool `int >= 0`
   or a string matching the canonical ASCII form `^(0|[1-9][0-9]*)$` — not
   Python `\d` (Unicode digits), no leading zeros, no floats including integral
@@ -79,13 +79,13 @@ Branch: `fix/review-reconciler`. All Python, all locally verifiable.
   page-two total must NOT verify; `1.9`, `-1`, `"1e3"`, `"1.9"`, `"01"`, `2.0`,
   `True` each leave the fetch unverified; the review's exact repro (total `1.9`,
   one record) must not certify.
-- [ ] **A4 (CR-03): refuse token-over-plaintext.** Replace `_warn_if_plaintext`
+- [x] **A4 (CR-03): refuse token-over-plaintext.** Replace `_warn_if_plaintext`
   with a constructor refusal when a token is set and `base_url` is non-loopback
   `http://`. Loopback and https unchanged. Replace the warning-assertion test
   (`test_provider_spatium.py:578-594`) with refusal coverage + a
   loopback-stays-working test. CLI-level test: the failure exits 1 with the
   message, no traceback.
-- [ ] **A5 (CR-04): cross-type transition preflight — in the runner, the shared
+- [x] **A5 (CR-04): cross-type transition preflight — in the runner, the shared
   seam.** Both providers reject CNAME-vs-anything coexistence at one owner, and
   the runner is where desired and actual sets both exist. The preflight covers:
   (a) desired CNAME plus desired non-CNAME at the same owner (truth-side
@@ -102,19 +102,19 @@ Branch: `fix/review-reconciler`. All Python, all locally verifiable.
   allowlisted, (iii) the conflicting edge record hidden in
   `blocked_keys`/`unparseable_keys`, (iv) truth-side CNAME+A at one owner — all
   refuse before any provider mutation.
-- [ ] **A6 (WR-01): schema-validate provider sections.** `config.py`: `edges`
+- [x] **A6 (WR-01): schema-validate provider sections.** `config.py`: `edges`
   must be a list; `[spatium]`/`[azure]`, when present, must be tables;
   `base_url`/`resource_group` non-empty strings. All failures → `ConfigError`.
   CLI tests: `spatium = "bad"` and `base_url = 8000` exit 1 with the message,
   no traceback.
-- [ ] **A7 (WR-02): Cloudflare response-shape guard.** `_request()`: after
+- [x] **A7 (WR-02): Cloudflare response-shape guard.** `_request()`: after
   `resp.json()`, non-dict body → `RuntimeError` naming path and type. Tests:
   `200 []`, `200 "x"`, `200 null`, and a non-2xx list body.
-- [ ] **A8 (WR-03): whole-diff TTL preflight.** `CloudflareProvider.apply()`
+- [x] **A8 (WR-03): whole-diff TTL preflight.** `CloudflareProvider.apply()`
   already walks every record for zone binding before mutating; add
   `_check_ttl` for every `to_add` and `to_update.desired` in that same loop.
   Test: mixed valid/invalid-TTL diff → zero HTTP mutations issued.
-- [ ] **A9: close out.** Full suite + ruff. Every new test confirmed to fail on
+- [x] **A9: close out.** Full suite + ruff. Every new test confirmed to fail on
   pre-fix code (run once against `main` before merge). PR through the gate.
 
 ## Task C — PR 2: Terraform (CR-07, WR-05, WR-06, WR-07)
