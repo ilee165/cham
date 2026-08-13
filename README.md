@@ -58,7 +58,7 @@ was made. Start with ADR-001.
 - [x] Phase 2 — Azure core (hub, spokes, peering, NSG, UDR)
 - [x] Phase 3 — WireGuard tunnel + hybrid resolution
 - [x] Phase 4 — Cloudflare + reconciler v2
-- [ ] Phase 5 — CI/CD pipeline
+- [x] Phase 5 — CI/CD pipeline
 
 Phase 4 defined **eight** exit criteria. Seven hold as written, with evidence
 under `docs/evidence/phase4/`: the offline suite passes with no credentials
@@ -74,13 +74,23 @@ eighth — the runbook's laptop-over-tunnel split-horizon demo — was
 using the hub's own resolver over the tunnel gets the public answer, and no
 tunnel run was performed (ADR-007).
 
-Four things Phase 4 did **not** settle, deferred with reasoning in
-[docs/decisions.md](docs/decisions.md) and scheduled in the Phase 5 plan's
-carried-forward work section: the `www` split horizon is served by the
-SpatiumDDI resolver and not by the hub's own BIND9 (ADR-007); the
-laptop-to-hub WireGuard tunnel is still the manual key-generation step
-cloud-init leaves to an operator; the SpatiumDDI apex zone shadows this
-domain's live Microsoft 365 records for lab-resolver clients (recorded in the
-Phase 4 plan's A4 notes); and the truth-side `demo` CNAME value is stored
-without its trailing dot, so SpatiumDDI's own BIND9 renders it relative
-(issue #9 — the reconciler is structurally immune, the lab resolver is not).
+Four things Phase 4 did **not** settle were carried into Phase 5's
+carried-forward work section. Two are now closed: the truth-side `demo`
+CNAME is stored absolute (issue #9 — all three predictions measured true,
+zero edge churn), and the apex zone no longer shadows this domain's live
+Microsoft 365 records — it moved to a serverless truth-only group so the
+lab resolver recurses for the apex (ADR-008; production MX, SPF, and
+autodiscover all verified resolving through it). The remaining two — the
+`www` split horizon served by the hub's own BIND9 (ADR-007) and the manual
+WireGuard key-generation step — are paired into one post-Phase-5 lab
+session, tracked as issue #18.
+
+Phase 5's pipeline is proven by execution, not description: all six
+evidence runs in `docs/evidence/phase5/notes.md` carry real run URLs — the
+PR gate blocking merge with no cloud call, both stacks applying through the
+saved-plan custody chain behind their own environment gates, drift's green
+path (silent) and red path (a labelled issue carrying the diff, then
+deduplicating), and the two-stage destroy. The first lab apply failed on a
+genuine Azure provisioning race and the custody chain held while the
+Terraform underneath it was fixed (PR #13) — which is the failure mode you
+want a pipeline to have.
