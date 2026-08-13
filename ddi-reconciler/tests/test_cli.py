@@ -703,5 +703,8 @@ def test_plaintext_remote_spatium_with_token_exits_1(tmp_path, monkeypatch, caps
                         lambda cfg, edges=None: {"azure-private": FakeProvider([])})
     assert cli.main(["--dry-run", "--config", str(config)]) == 1
     err = capsys.readouterr().err
-    assert "plaintext" in err
+    # The refusal message specifically — the pre-fix code also printed the
+    # word "plaintext" (as a warning) and also exited 1 (on the ensuing
+    # connection failure), so only the refusal wording separates old from new.
+    assert "Refusing to start" in err
     assert "Traceback" not in err
