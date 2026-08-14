@@ -121,7 +121,7 @@ Branch: `fix/review-reconciler`. All Python, all locally verifiable.
 
 Branch: `fix/review-terraform`. Verification: fmt/validate/tflint/checkov + tftest.
 
-- [ ] **C1 (CR-07): serialize resolver after peerings — with a regression
+- [x] **C1 (CR-07): serialize resolver after peerings — with a regression
   test.** `module "dns_resolver"` gains `depends_on = [module.spoke_app,
   module.spoke_mgmt]` with a comment tying it to the
   `ReferencedResourceNotProvisioned` class and PR #13. The TDD rule holds here
@@ -130,11 +130,11 @@ Branch: `fix/review-terraform`. Verification: fmt/validate/tflint/checkov + tfte
   `module.dns_resolver` (workflow-gates style), or a graph-output assertion
   that the resolver module's nodes depend on the spoke modules. Live proof
   additionally lands with issue #18's resolver-enabled session.
-- [ ] **C2 (WR-05): pin image versions.** Query current marketplace version for
+- [x] **C2 (WR-05): pin image versions.** Query current marketplace version for
   the Ubuntu SKU (`az vm image show --urn ...:latest`), pin in
   `modules/hub/main.tf:280` and `modules/spoke/testvm.tf:53`, comment the bump
   procedure. No lab needed for the query.
-- [ ] **C3 (WR-06): CIDR relationship preconditions — disjointness AND
+- [x] **C3 (WR-06): CIDR relationship preconditions — disjointness AND
   containment, each where it belongs.** Two different invariants:
   (a) top-level routed networks — hub `/22`, both spoke `/22`s,
   `onprem_address_space`, `wg_transfer_cidr` — must be pairwise DISJOINT;
@@ -147,11 +147,11 @@ Branch: `fix/review-terraform`. Verification: fmt/validate/tflint/checkov + tfte
   (must pass), overlap between the two variables, resolver subnet outside the
   hub range (must fail), resolver subnet colliding with the VPN subnet (must
   fail).
-- [ ] **C4 (WR-07): WireGuard key shape validation.** `^[A-Za-z0-9+/]{43}=$`
+- [x] **C4 (WR-07): WireGuard key shape validation.** `^[A-Za-z0-9+/]{43}=$`
   (44-char base64 of 32 bytes) at BOTH `envs/lab/variables.tf:126` and
   `modules/hub/variables.tf:217`. Reject empty/whitespace. Update the tftest
   fixture key to a valid-shaped dummy. tftest: malformed key fails plan.
-- [ ] **C5: close out.** fmt/validate/tflint/checkov/tftest. PR through the gate.
+- [x] **C5: close out.** fmt/validate/tflint/checkov/tftest. PR through the gate.
 
 ## Task B — PR 3: workflow hardening (CR-08, WR-04)
 
