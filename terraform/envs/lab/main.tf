@@ -147,6 +147,12 @@ module "dns_resolver" {
   lab_zone   = var.lab_zone
   hub_dns_ip = module.hub.vm_private_ip
   tags       = local.tags
+
+  # CR-07: the forwarding VNet links reference the spoke VNets, not their
+  # hub-side peerings, so without this the resolver can be provisioned while
+  # a peering is still in flight — the ReferencedResourceNotProvisioned class
+  # that already hit the spoke pair (PR #13). Serialize after both spokes.
+  depends_on = [module.spoke_app, module.spoke_mgmt]
 }
 
 # Budget alert — notification only. Azure has NO automatic spend cap.
