@@ -277,7 +277,11 @@ resource "azurerm_linux_virtual_machine" "hub" {
     publisher = "Canonical"
     offer     = "ubuntu-24_04-lts"
     sku       = "server"
-    version   = "latest"
+    # WR-05: pinned so a marketplace publish cannot change what a plan
+    # deploys. Bump deliberately via PR:
+    #   az vm image show --urn Canonical:ubuntu-24_04-lts:server:latest \
+    #     --query name -o tsv
+    version = "24.04.202608070"
   }
 
   # Normalize the checked-out template to LF before encoding. Without this,

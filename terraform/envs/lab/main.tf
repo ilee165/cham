@@ -20,6 +20,54 @@ locals {
   resolver_inbound_subnet_cidr  = "10.10.2.0/28"
   resolver_outbound_subnet_cidr = "10.10.2.16/28"
 
+  # WR-06: mirror of the hub module's address_space, held here and passed
+  # explicitly so the root can prove the routed networks below are pairwise
+  # disjoint — the module default alone would leave the root reasoning about
+  # a value it never sees.
+  hub_address_space = "10.10.0.0/22"
+
+  # Every top-level routed network. These meet in UDRs, NSG rules, BIND ACLs,
+  # WireGuard AllowedIPs, and NAT sources; an overlap plans cleanly and then
+  # hairpins or blackholes traffic depending on which table wins.
+  routed_networks = {
+    hub                = local.hub_address_space
+    spoke_app          = local.spoke_cidrs.app
+    spoke_mgmt         = local.spoke_cidrs.mgmt
+    onprem             = var.onprem_address_space
+    wireguard_transfer = var.wg_transfer_cidr
+  }
+
+  # Two CIDRs overlap iff, at the coarser of the two prefix lengths, both
+  # networks collapse to the same address. try() defaults to true so a
+  # malformed operand reads as a collision (fail closed) — the per-variable
+  # syntax validations then name the actual problem.
+  # HCL's < compares only numbers, so pair up by index rather than by name;
+  # objects (not tuples) survive flatten(), which recurses into nested lists.
+  routed_network_names = keys(local.routed_networks)
+  routed_network_pairs = flatten([
+    for i, a in local.routed_network_names : [
+      for j, b in local.routed_network_names : { a = a, b = b } if i < j
+    ]
+  ])
+
+  routed_network_overlaps = [
+    for pair in local.routed_network_pairs :
+    format("%s (%s) overlaps %s (%s)",
+      pair.a, local.routed_networks[pair.a],
+      pair.b, local.routed_networks[pair.b],
+    )
+    if try(
+      cidrsubnet(format("%s/%d", split("/", local.routed_networks[pair.a])[0], min(
+        tonumber(split("/", local.routed_networks[pair.a])[1]),
+        tonumber(split("/", local.routed_networks[pair.b])[1]),
+      )), 0, 0)
+      == cidrsubnet(format("%s/%d", split("/", local.routed_networks[pair.b])[0], min(
+        tonumber(split("/", local.routed_networks[pair.a])[1]),
+        tonumber(split("/", local.routed_networks[pair.b])[1]),
+      )), 0, 0),
+    true)
+  ]
+
   # Per-spoke overrides can represent the quota-blocked app-only live state.
   # The legacy shared flag remains a compatibility fallback for existing
   # gitignored tfvars and must not be used for new configuration.
@@ -37,10 +85,20 @@ resource "azurerm_resource_group" "lab" {
   name     = "rg-cham-lab"
   location = var.location
   tags     = local.tags
+
+  # WR-06: every other resource depends on this group, so a routed-network
+  # overlap stops the whole plan here, before anything is created.
+  lifecycle {
+    precondition {
+      condition     = length(local.routed_network_overlaps) == 0
+      error_message = "Top-level routed networks must be pairwise disjoint — an overlap plans cleanly and then hairpins or blackholes traffic at runtime: ${join("; ", local.routed_network_overlaps)}"
+    }
+  }
 }
 
 module "hub" {
   source                       = "../../modules/hub"
+  address_space                = local.hub_address_space
   location                     = var.location
   vm_size                      = var.vm_size
   disk_controller_type         = var.hub_disk_controller_type
@@ -139,6 +197,10 @@ module "dns_resolver" {
   wg_transfer_cidr     = var.wg_transfer_cidr
   inbound_subnet_cidr  = local.resolver_inbound_subnet_cidr
   outbound_subnet_cidr = local.resolver_outbound_subnet_cidr
+  # WR-06: the module proves both resolver subnets fit the hub range and miss
+  # the subnets the hub has already carved.
+  hub_address_space         = module.hub.vnet_address_space
+  hub_reserved_subnet_cidrs = [module.hub.vpn_subnet_cidr, module.hub.shared_subnet_cidr]
   forwarding_vnet_links = {
     hub  = module.hub.vnet_id
     app  = module.spoke_app.vnet_id
@@ -147,6 +209,12 @@ module "dns_resolver" {
   lab_zone   = var.lab_zone
   hub_dns_ip = module.hub.vm_private_ip
   tags       = local.tags
+
+  # CR-07: the forwarding VNet links reference the spoke VNets, not their
+  # hub-side peerings, so without this the resolver can be provisioned while
+  # a peering is still in flight — the ReferencedResourceNotProvisioned class
+  # that already hit the spoke pair (PR #13). Serialize after both spokes.
+  depends_on = [module.spoke_app, module.spoke_mgmt]
 }
 
 # Budget alert — notification only. Azure has NO automatic spend cap.

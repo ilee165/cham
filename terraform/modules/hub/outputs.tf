@@ -34,6 +34,11 @@ output "vnet_name" {
   ]
 }
 output "vnet_address_space" { value = var.address_space }
+
+# WR-06: consumed by the root to tell the dns-resolver module which hub
+# subnets its inbound/outbound subnets must not collide with.
+output "vpn_subnet_cidr" { value = var.vpn_subnet_cidr }
+output "shared_subnet_cidr" { value = var.shared_subnet_cidr }
 output "vm_private_ip" { value = var.hub_vm_ip }
 output "vm_public_ip" { value = azurerm_public_ip.hub.ip_address }
 output "shared_subnet_id" { value = azurerm_subnet.shared.id }

@@ -2,7 +2,7 @@
 subscription_id    = "00000000-0000-0000-0000-000000000000"
 home_ip            = "203.0.113.10/32"          # your home public IP
 ssh_public_key     = "ssh-ed25519 AAAA... you@laptop"
-wg_peer_public_key = "laptop-wireguard-public-key"
+wg_peer_public_key = "ReplaceWithTheOutputOfWgPubkeyCommandHere00=" # `wg pubkey` output: 43 base64 chars + '='
 alert_email        = "you@example.com"
 budget_start_date  = "2026-08-01T00:00:00Z"
 vm_size                 = "Standard_D2als_v7" # hub appliance (NVMe-boot-only SKU)

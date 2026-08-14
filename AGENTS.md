@@ -38,7 +38,7 @@ Use four spaces for Python and Ruff-compatible conventions: `snake_case` for fun
 
 ## Testing Guidelines
 
-Pytest is the test framework. Name files `test_*.py` and tests `test_*`; place them under `ddi-reconciler/tests/`. Test validation, diff behavior, CLI modes, and provider boundaries. Tests must run without network access, cloud credentials, or Azure login. No coverage threshold is configured, so behavioral changes should include regression tests.
+Pytest is the test framework. Name files `test_*.py` and tests `test_*`; place them under `ddi-reconciler/tests/`. Test validation, diff behavior, CLI modes, and provider boundaries. The same suite also hosts the repository's structural contract pins — properties that live outside the reconciler's own code, such as workflow YAML gates (`test_workflow_gates.py`) and Terraform structure (`test_terraform_structure.py`) — because it is the only pytest suite CI runs on every PR. Tests must run without network access, cloud credentials, or Azure login. No coverage threshold is configured, so behavioral changes should include regression tests.
 
 ## Commit & Pull Request Guidelines
 

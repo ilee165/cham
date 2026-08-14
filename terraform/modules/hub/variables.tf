@@ -64,11 +64,45 @@ variable "address_space" {
 variable "vpn_subnet_cidr" {
   type    = string
   default = "10.10.0.0/27"
+
+  # WR-06: carved from the hub VNet, so it must lie inside address_space —
+  # a subnet outside the VNet range plans cleanly and fails at Azure apply.
+  validation {
+    condition = try(
+      tonumber(split("/", var.vpn_subnet_cidr)[1]) >= tonumber(split("/", var.address_space)[1]) &&
+      cidrsubnet(format("%s/%s", split("/", var.vpn_subnet_cidr)[0], split("/", var.address_space)[1]), 0, 0)
+      == cidrsubnet(var.address_space, 0, 0),
+    false)
+    error_message = "vpn_subnet_cidr must be a valid IPv4 CIDR contained within address_space — it is carved from the hub VNet, and Azure rejects out-of-range subnets only at apply time."
+  }
 }
 
 variable "shared_subnet_cidr" {
   type    = string
   default = "10.10.1.0/24"
+
+  validation {
+    condition = try(
+      tonumber(split("/", var.shared_subnet_cidr)[1]) >= tonumber(split("/", var.address_space)[1]) &&
+      cidrsubnet(format("%s/%s", split("/", var.shared_subnet_cidr)[0], split("/", var.address_space)[1]), 0, 0)
+      == cidrsubnet(var.address_space, 0, 0),
+    false)
+    error_message = "shared_subnet_cidr must be a valid IPv4 CIDR contained within address_space — it is carved from the hub VNet, and Azure rejects out-of-range subnets only at apply time."
+  }
+
+  validation {
+    condition = !try(
+      cidrsubnet(format("%s/%d", split("/", var.shared_subnet_cidr)[0], min(
+        tonumber(split("/", var.shared_subnet_cidr)[1]),
+        tonumber(split("/", var.vpn_subnet_cidr)[1]),
+      )), 0, 0)
+      == cidrsubnet(format("%s/%d", split("/", var.vpn_subnet_cidr)[0], min(
+        tonumber(split("/", var.shared_subnet_cidr)[1]),
+        tonumber(split("/", var.vpn_subnet_cidr)[1]),
+      )), 0, 0),
+    true)
+    error_message = "shared_subnet_cidr must not overlap vpn_subnet_cidr — overlapping subnet definitions plan cleanly and fail at Azure apply."
+  }
 }
 
 variable "hub_vm_ip" {
@@ -194,6 +228,40 @@ variable "resolver_inbound_subnet_cidr" {
     )
     error_message = "resolver_inbound_subnet_cidr must be a valid IPv4 CIDR such as 10.10.2.0/28."
   }
+
+  # WR-06: carved from the hub VNet like vpn/shared, and additionally the NSG
+  # rule this module builds for it assumes it is a distinct destination.
+  validation {
+    condition = try(
+      tonumber(split("/", var.resolver_inbound_subnet_cidr)[1]) >= tonumber(split("/", var.address_space)[1]) &&
+      cidrsubnet(format("%s/%s", split("/", var.resolver_inbound_subnet_cidr)[0], split("/", var.address_space)[1]), 0, 0)
+      == cidrsubnet(var.address_space, 0, 0),
+    false)
+    error_message = "resolver_inbound_subnet_cidr must be contained within address_space — the resolver inbound subnet is carved from the hub VNet, and Azure rejects out-of-range subnets only at apply time."
+  }
+
+  validation {
+    condition = !try(
+      cidrsubnet(format("%s/%d", split("/", var.resolver_inbound_subnet_cidr)[0], min(
+        tonumber(split("/", var.resolver_inbound_subnet_cidr)[1]),
+        tonumber(split("/", var.vpn_subnet_cidr)[1]),
+      )), 0, 0)
+      == cidrsubnet(format("%s/%d", split("/", var.vpn_subnet_cidr)[0], min(
+        tonumber(split("/", var.resolver_inbound_subnet_cidr)[1]),
+        tonumber(split("/", var.vpn_subnet_cidr)[1]),
+      )), 0, 0),
+      true) && !try(
+      cidrsubnet(format("%s/%d", split("/", var.resolver_inbound_subnet_cidr)[0], min(
+        tonumber(split("/", var.resolver_inbound_subnet_cidr)[1]),
+        tonumber(split("/", var.shared_subnet_cidr)[1]),
+      )), 0, 0)
+      == cidrsubnet(format("%s/%d", split("/", var.shared_subnet_cidr)[0], min(
+        tonumber(split("/", var.resolver_inbound_subnet_cidr)[1]),
+        tonumber(split("/", var.shared_subnet_cidr)[1]),
+      )), 0, 0),
+    true)
+    error_message = "resolver_inbound_subnet_cidr must not overlap the VPN or shared subnets — overlapping subnet definitions plan cleanly and fail at Azure apply."
+  }
 }
 
 variable "lab_zone" {
@@ -215,8 +283,13 @@ variable "onprem_dns_ip" {
 }
 
 variable "wg_peer_public_key" {
-  description = "Laptop WireGuard public key (public keys are safe to commit)"
+  description = "Laptop WireGuard public key (public keys are safe to commit). WR-07: shape-validated here as well as in the calling root — this module renders the value straight into cloud-init."
   type        = string
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9+/]{43}=$", var.wg_peer_public_key))
+    error_message = "wg_peer_public_key must be a base64-encoded 32-byte WireGuard public key — exactly 43 base64 characters followed by '=' (e.g. the output of `wg pubkey`). An empty or malformed value would plan cleanly, bill the hub VM, and fail WireGuard setup on first boot."
+  }
 }
 
 variable "tags" {
