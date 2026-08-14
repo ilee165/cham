@@ -66,7 +66,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import sys
+import re
 import urllib.parse
 
 import requests
@@ -98,29 +98,62 @@ _MAX_PAGES = 200
 _TIMEOUT = 10
 
 
-def _first_int_field(body: dict, keys: tuple[str, ...]) -> tuple[str, int] | None:
-    """(key, value) for the first of `keys` present with an integer-ish value.
+# Canonical ASCII non-negative integer: no sign, no leading zeros (except "0"
+# itself), no Unicode digits — Python's \d matches "١٢٣", and int() would then
+# happily parse it. REVIEW.md CR-02.
+_CANONICAL_INT = re.compile(r"^(0|[1-9][0-9]*)$")
+
+
+def _parse_count(value) -> int | None:
+    """`value` as a pagination count, or None when it is not one exactly.
+
+    Only a non-bool int >= 0 or a string in canonical ASCII form counts.
+    Floats are rejected even when integral: int(1.9) silently truncating to 1
+    is how a malformed total certified a partial read of the source of truth
+    as complete (CR-02), and a server sending 2.0 where an integer belongs is
+    a server whose metadata this adapter must not vouch for.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and _CANONICAL_INT.match(value):
+        return int(value)
+    return None
+
+
+def _first_int_field(body: dict, keys: tuple[str, ...]) -> tuple[tuple[str, int] | None, bool]:
+    """((key, value) or None, malformed) for the recognized keys of `body`.
+
+    Tri-state on purpose (CR-02): *found*, *absent*, or *malformed* — and
+    malformed poisons the lot. If ANY recognized key is present with a value
+    that is not a canonical non-negative integer, the whole lookup reports
+    (None, True): a later alias in the same body must not restore what a
+    malformed earlier one forfeited ({"total": 1.9, "count": 1} must not
+    certify via "count"), and metadata too damaged to verify with is also too
+    damaged to navigate with.
 
     The key travels with the value because a page-size echoed back into the
     next request has to use the name this deployment answers to (`page_size`
     here, `size` or `limit` elsewhere) — guessing it renames the parameter and
     the server silently serves its default instead.
     """
+    found: tuple[str, int] | None = None
     for key in keys:
-        value = body.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        if key not in body:
             continue
-        try:
-            return key, int(value)
-        except (TypeError, ValueError):
-            continue
-    return None
+        parsed = _parse_count(body[key])
+        if parsed is None:
+            return None, True
+        if found is None:
+            found = (key, parsed)
+    return found, False
 
 
-def _first_int(body: dict, keys: tuple[str, ...]) -> int | None:
-    """First of `keys` present in `body` with an integer-ish value."""
-    found = _first_int_field(body, keys)
-    return None if found is None else found[1]
+def _first_int(body: dict, keys: tuple[str, ...]) -> tuple[int | None, bool]:
+    """(first recognized value or None, malformed) — see _first_int_field."""
+    found, malformed = _first_int_field(body, keys)
+    return (None if found is None else found[1]), malformed
 
 
 def _with_query(url: str, params: dict[str, int]) -> str:
@@ -151,20 +184,27 @@ class SpatiumProvider:
         self.read_verified = False
         self._session = requests.Session()
         if token:
+            self._refuse_plaintext()
             self._session.headers["Authorization"] = f"Bearer {token}"
-            self._warn_if_plaintext()
 
-    def _warn_if_plaintext(self) -> None:
-        """IN-2: the bearer token traverses whatever scheme `base_url` names.
-        `http://localhost:8000` is the documented lab setup and stays silent;
-        plaintext to anything else puts SPATIUM_API_TOKEN on the wire, so warn
-        rather than refuse (refusing would break the documented lab)."""
+    def _refuse_plaintext(self) -> None:
+        """REVIEW.md CR-03: a bearer token over non-loopback plaintext http is
+        refused at construction, before the token ever touches a session
+        header. This used to be a warning, on the theory that refusal would
+        break the documented lab — but the lab is `http://localhost:8000`,
+        which is loopback and stays silent, so the only configuration the
+        warning permitted was the one that puts SPATIUM_API_TOKEN on the wire
+        for any on-path observer. There is deliberately no override flag: an
+        escape hatch for credential exposure trains the habit of using it.
+        Remote deployments use https."""
         parts = urllib.parse.urlsplit(self.base_url)
         if parts.scheme != "http" or _is_loopback((parts.hostname or "").lower()):
             return
-        print(f"warning: spatium base_url {self.base_url!r} is plaintext http to a "
-              "non-loopback host — SPATIUM_API_TOKEN is sent in the clear on every "
-              "request; use https://", file=sys.stderr)
+        raise RuntimeError(
+            f"spatium base_url {self.base_url!r} is plaintext http to a non-loopback "
+            "host and a token is configured — SPATIUM_API_TOKEN would be sent in the "
+            "clear on every request. Use https://, or loopback for the local lab. "
+            "Refusing to start.")
 
     # ---- HTTP -------------------------------------------------------------
 
@@ -227,39 +267,55 @@ class SpatiumProvider:
         return False, None
 
     def _next_url(self, body: dict, path: str, current_url: str, page_number: int,
-                  consumed: int, page_len: int, total: int | None) -> str | None:
+                  consumed: int, page_len: int,
+                  total: int | None) -> tuple[str | None, bool]:
+        """(next page URL or None, whether any recognized metadata was malformed).
+
+        Malformed pagination metadata (CR-02) degrades navigation to whatever
+        the remaining clean signals support — a malformed field is treated as
+        absent for walking — but the flag travels back to _get(), where it
+        poisons verification for the whole fetch. Walking on regardless is
+        safe because the walk's OUTPUT is only ever certified by the
+        verification verdict; an unverified read cannot authorize deletion.
+
+        Every recognized field is parsed up front, before any navigation
+        branch returns: the latch covers "any recognized key on any page", so
+        a malformed `page` beside an explicit next-link — or a malformed
+        `page_size` under a page-count branch that never consults it — must
+        taint the fetch even though navigation never needed the value.
+        """
+        pages, bad_pages = _first_int(body, PAGE_COUNT_KEYS)
+        current_page, bad_page = _first_int_field(body, PAGE_KEYS)
+        size, bad_size = _first_int_field(body, LIMIT_KEYS)
+        offset, bad_offset = _first_int(body, OFFSET_KEYS)
+        malformed = bad_pages or bad_page or bad_size or bad_offset
         has_link, link = self._explicit_next(body, current_url, path)
         if has_link:
-            return link
+            return link, malformed
         # Page-numbered envelope that declares how many pages there are
         # (fastapi-pagination Page: page/pages/size).
-        pages = _first_int(body, PAGE_COUNT_KEYS)
         if pages is not None:
-            current = _first_int(body, PAGE_KEYS)
-            if current is None:
-                current = page_number
-            return None if current >= pages else _with_query(current_url, {"page": current + 1})
+            current = page_number if current_page is None else current_page[1]
+            next_url = (None if current >= pages
+                        else _with_query(current_url, {"page": current + 1}))
+            return next_url, malformed
         # Page-numbered envelope that declares only a total — SpatiumDDI's
         # {items, total, page, page_size}. There is no page count and no next
         # link, so the total is the only thing that says another page exists.
         # An empty page ends the walk even with the total unmet; the short-read
         # check below is what turns that into an error.
-        current_page = _first_int_field(body, PAGE_KEYS)
         if current_page is not None and total is not None and consumed < total and page_len:
             params = {"page": current_page[1] + 1}
-            size = _first_int_field(body, LIMIT_KEYS)
             if size is not None:
                 params[size[0]] = size[1]
-            return _with_query(current_url, params)
+            return _with_query(current_url, params), malformed
         # Offset/limit envelope (fastapi-pagination LimitOffsetPage), inferred
         # from the declared total: there is more to read and no link to it.
         if total is not None and consumed < total and page_len:
-            offset = _first_int(body, OFFSET_KEYS)
-            limit = _first_int(body, LIMIT_KEYS)
             return _with_query(current_url, {
                 "offset": (consumed - page_len if offset is None else offset) + page_len,
-                "limit": page_len if limit is None else limit})
-        return None
+                "limit": page_len if size is None else size[1]}), malformed
+        return None, malformed
 
     def _read(self, path: str) -> list:
         """_get() with its verifiability folded into the fetch-wide verdict.
@@ -278,6 +334,12 @@ class SpatiumProvider:
         items: list = []
         declared_total: int | None = None
         previous_page: list | None = None
+        # CR-02: latched the moment any recognized pagination field on any page
+        # is present but not a canonical non-negative integer. Once False it
+        # never recovers — a valid total on page 2 says nothing about the page
+        # whose metadata already proved unreliable, so no later alias or later
+        # page may restore verification for this fetch.
+        metadata_ok = True
         # Identity of every item this walk has returned (CR-01). The length
         # check against the declared total counts *rows*, so a page overlap —
         # A,B then B,C with total=4 — used to fill the count while a fourth
@@ -331,7 +393,8 @@ class SpatiumProvider:
                         "delete order downstream. Refusing the read.")
                 seen_items.add(fingerprint)
             items.extend(page_items)
-            total = _first_int(body, TOTAL_KEYS)
+            total, bad = _first_int(body, TOTAL_KEYS)
+            metadata_ok = metadata_ok and not bad
             if total is not None:
                 if declared_total is None:
                     declared_total = total
@@ -341,8 +404,9 @@ class SpatiumProvider:
                         f"{declared_total} to {total} between pages — the collection is "
                         "being modified under the walk, so no count can certify this "
                         "read as complete")
-            following = self._next_url(body, path, url, page_number, len(items),
-                                       len(page_items), declared_total)
+            following, bad = self._next_url(body, path, url, page_number, len(items),
+                                            len(page_items), declared_total)
+            metadata_ok = metadata_ok and not bad
             if following == url:
                 raise RuntimeError(
                     f"spatium API error on {path}: pagination did not advance — the next "
@@ -358,8 +422,11 @@ class SpatiumProvider:
         # See the module docstring: a bare list is the whole collection and has
         # nothing to reconcile; an envelope is a window and must reconcile
         # against the total it declared. An envelope that declares no total is
-        # the one shape the caller must not mistake for verified.
-        return items, whole_body_was_a_bare_list or declared_total is not None
+        # the one shape the caller must not mistake for verified — and an
+        # envelope whose recognized metadata was malformed anywhere in the walk
+        # is unverifiable no matter what its clean fields declared (CR-02).
+        return items, whole_body_was_a_bare_list or (
+            declared_total is not None and metadata_ok)
 
     # ---- payload access ---------------------------------------------------
 

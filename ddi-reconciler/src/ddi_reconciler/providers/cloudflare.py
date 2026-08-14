@@ -131,6 +131,13 @@ class CloudflareProvider:
             body = resp.json()
         except (requests.RequestException, ValueError) as exc:
             raise RuntimeError(f"cloudflare API error on {path}: {exc}") from exc
+        # WR-02: valid JSON is not necessarily an object. A top-level list,
+        # string, number, or null would escape as AttributeError on .get()
+        # below, bypassing the CLI's operational-error contract.
+        if not isinstance(body, dict):
+            raise RuntimeError(
+                f"cloudflare API error on {path}: response body is JSON "
+                f"{type(body).__name__}, expected an object (status {resp.status_code})")
         if not resp.ok or not body.get("success", False):
             raise RuntimeError(
                 f"cloudflare API {resp.status_code} on {path}: {body.get('errors')}")
@@ -494,6 +501,13 @@ class CloudflareProvider:
         for record in (*diff.to_add, *(u.desired for u in diff.to_update),
                        *(u.actual for u in diff.to_update), *diff.to_delete):
             self._require_zone(record)
+        # WR-03: TTL preflight, same principle and same placement. _check_ttl
+        # also runs inside each mutation, but per-op validation discovers an
+        # invalid later record only after earlier writes have landed — a diff
+        # with a valid first add and an invalid second used to write the first
+        # and then deterministically fail, leaving avoidable partial state.
+        for record in (*diff.to_add, *(u.desired for u in diff.to_update)):
+            self._check_ttl(record)
         zone_id = self._zone()
         for record in diff.to_add:
             for value in record.values:

@@ -5,10 +5,10 @@ to ddi-reconciler/desired-records.json and drift runs compare edges against
 that committed snapshot (ADR-006).
 
 The snapshot is a delete order for everything it omits, so it has to be able to
-prove it arrived whole. Format v1 is therefore self-describing:
+prove it arrived whole. Format v2 is therefore self-describing:
 
     {
-      "version": 1,
+      "version": 2,
       "truth_verified": true,
       "count": 2,
       "checksum": "sha256:<hex>",
@@ -46,11 +46,26 @@ from ddi_reconciler.model import CanonicalRecord
 
 _REQUIRED_FIELDS = ("zone", "name", "rtype", "values", "ttl")
 _STRING_FIELDS = ("zone", "name", "rtype")
-SNAPSHOT_VERSION = 1
+# v2 (REVIEW.md CR-01): the checksum binds version + truth_verified + count +
+# records, so the deletion-authority flag can no longer be flipped on a
+# checksum-clean file. v1 snapshots (records-only hash) are hard-rejected by
+# the version check with a "re-export it" message — migration is a re-export
+# to a sibling path, verified, then moved over the tracked file; never
+# --allow-snapshot-shrink, which authorizes record loss, not format changes.
+SNAPSHOT_VERSION = 2
 
 
 class SnapshotError(RuntimeError):
     """A snapshot write was refused because it would lose records."""
+
+
+class SnapshotVersionError(ValueError):
+    """The envelope is well-formed but written in a different snapshot format.
+
+    Distinct from a plain ValueError so _prior_count can route it to the
+    migration procedure (re-export to a sibling path) instead of the damage
+    message, whose --allow-snapshot-shrink advice authorizes record loss and
+    must never read as the way past a format change."""
 
 
 class DesiredSnapshot(NamedTuple):
@@ -71,14 +86,28 @@ def _payload(records: list[CanonicalRecord]) -> list[dict]:
     ]
 
 
-def _checksum(payload: list[dict]) -> str:
-    """Content hash of the records array alone.
+def _checksum(payload: list[dict], *, truth_verified: bool) -> str:
+    """Content hash binding the records array AND the fields that give it
+    authority (REVIEW.md CR-01).
 
-    Keyed on the records, not the whole envelope, so it stays stable if the
-    envelope gains a field. Separators and key order are pinned because the
-    hash must not depend on json.dumps' formatting defaults.
+    v1 hashed the records alone, so flipping `truth_verified` from false to
+    true left a checksum-clean file — and that flag is precisely what
+    authorizes deletion downstream (`load_desired(...).verified` feeds the
+    runner's UnverifiedTruthError gate). The hash input is now a canonical
+    envelope object carrying `version`, `truth_verified`, `count`, and
+    `records`, so no integrity-relevant field can change independently of the
+    checksum. The checksum field itself stays out of its own input.
+
+    Separators and key order are pinned because the hash must not depend on
+    json.dumps' formatting defaults.
     """
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    bound = {
+        "version": SNAPSHOT_VERSION,
+        "truth_verified": truth_verified,
+        "count": len(payload),
+        "records": payload,
+    }
+    canonical = json.dumps(bound, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -117,13 +146,19 @@ def _prior_count(path: Path) -> int | None:
         raise unreadable(f"it holds a JSON {type(body).__name__}, not a snapshot")
     try:
         _verify_envelope(body)
+    except SnapshotVersionError as exc:
+        raise SnapshotError(
+            f"refusing to overwrite {path}: {exc}. A version mismatch is a format "
+            "change, not record loss — migrate by exporting to a sibling path, "
+            "verifying it, and moving it over this file; --allow-snapshot-shrink "
+            "does not apply and would authorize losing records.") from exc
     except ValueError as exc:
         raise unreadable(str(exc)) from exc
     return len(body["records"])
 
 
 def _verify_envelope(body: dict) -> None:
-    """Check a v1 envelope's integrity. Raises ValueError describing the break.
+    """Check a snapshot envelope's integrity. Raises ValueError on the break.
 
     This is the check that turns a shorter file from "a smaller truth" into
     "a damaged file": count and checksum are both re-derived from the records
@@ -131,9 +166,13 @@ def _verify_envelope(body: dict) -> None:
     all caught. A legitimate removal goes through --export, which rewrites the
     records and both integrity fields together.
     """
+    # Type-checked, not merely compared: the checksum is computed from the
+    # SNAPSHOT_VERSION constant, so a float 2.0 or bool in the file would pass
+    # Python equality with a checksum-clean file (cross-AI review of PR #20).
     version = body.get("version")
-    if version != SNAPSHOT_VERSION:
-        raise ValueError(
+    if isinstance(version, bool) or not isinstance(version, int) \
+            or version != SNAPSHOT_VERSION:
+        raise SnapshotVersionError(
             f"snapshot version is {version!r}, expected {SNAPSHOT_VERSION} — re-export it "
             "with a matching cham-reconcile")
     records = body.get("records")
@@ -146,22 +185,27 @@ def _verify_envelope(body: dict) -> None:
         raise ValueError(
             f"it declares {count} record(s) but carries {len(records)}; a snapshot that "
             "disagrees with its own count is truncated or hand-edited, not a smaller truth")
+    # truth_verified is validated BEFORE the checksum because its value
+    # participates in the hash (CR-01): a checksum computed over a wrong-typed
+    # flag would produce a confusing mismatch message instead of naming the
+    # actual defect.
+    truth_verified = body.get("truth_verified")
+    if not isinstance(truth_verified, bool):
+        raise ValueError("'truth_verified' is missing or is not a boolean")
     checksum = body.get("checksum")
     if not isinstance(checksum, str):
         raise ValueError("'checksum' is missing or is not a string")
-    actual = _checksum(records)
+    actual = _checksum(records, truth_verified=truth_verified)
     if checksum != actual:
         raise ValueError(
-            f"its checksum {checksum} does not match its records ({actual}); the file was "
-            "edited without re-exporting it")
-    truth_verified = body.get("truth_verified", False)
-    if not isinstance(truth_verified, bool):
-        raise ValueError("'truth_verified' is not a boolean")
+            f"its checksum {checksum} does not match its integrity-bound fields ({actual}); "
+            "the file was edited without re-exporting it — this includes flipping "
+            "'truth_verified', which is deletion authority and is bound into the hash")
 
 
 def save_desired(records: list[CanonicalRecord], path: Path, *,
                  truth_verified: bool, allow_shrink: bool = False) -> None:
-    """Write a v1 snapshot atomically.
+    """Write a current-format snapshot atomically.
 
     `truth_verified` travels with the data: it is the caller's answer to "could
     the read behind these records be proven complete?", and load_desired hands
@@ -189,7 +233,7 @@ def save_desired(records: list[CanonicalRecord], path: Path, *,
         "version": SNAPSHOT_VERSION,
         "truth_verified": truth_verified,
         "count": len(payload),
-        "checksum": _checksum(payload),
+        "checksum": _checksum(payload, truth_verified=truth_verified),
         "records": payload,
     }
     # Write-then-rename: an interrupted write (Ctrl-C, disk full) must not

@@ -7,6 +7,7 @@ from ddi_reconciler.runner import (
     ConvergenceError,
     EmptyTruthError,
     OwnershipError,
+    TypeConflictError,
     UnverifiedTruthError,
     UnwritableKeyError,
     apply_edge,
@@ -435,3 +436,137 @@ def test_on_mutate_does_not_fire_for_a_plan_time_refusal(truth, provider_kwargs,
     with pytest.raises(error):
         apply_edge(EDGE, truth, provider, truth_complete=True, on_mutate=seen.append)
     assert seen == []
+
+
+# --- CR-04: record-type transitions cannot converge and must refuse ----------
+
+def _cname(name, target, zone=Z):
+    return CanonicalRecord(zone=zone, name=name, rtype="CNAME", values=(target,))
+
+
+def test_cname_to_a_transition_refuses_with_both_keys_allowlisted():
+    """Even with old and new keys both managed, create-before-delete ordering
+    means the A's create is rejected while the CNAME stands. Refuse up front,
+    before any provider call can mutate."""
+    edge = EdgeConfig(name="e", provider="azure", zone=Z,
+                      managed_keys=frozenset({(Z, "app", "A"), (Z, "app", "CNAME")}))
+    provider = FakeProvider([_cname("app", "old.target.example")])
+    with pytest.raises(TypeConflictError, match="manage only the old type") as exc:
+        plan_edge(edge, [rec("app", "10.10.4.30")], provider, truth_complete=True)
+    assert "desired A vs edge CNAME" in str(exc.value)
+    assert provider.apply_calls == 0
+
+
+def test_a_to_cname_transition_refuses_when_only_the_new_key_is_managed():
+    """The old A is not allowlisted, so its DELETE can never even be planned —
+    the transition is unappliable in a second, quieter way."""
+    edge = EdgeConfig(name="e", provider="azure", zone=Z,
+                      managed_keys=frozenset({(Z, "app", "CNAME")}))
+    provider = FakeProvider([rec("app", "10.10.4.30")])
+    with pytest.raises(TypeConflictError, match="cannot converge"):
+        plan_edge(edge, [_cname("app", "new.target.example")], provider,
+                  truth_complete=True)
+    assert provider.apply_calls == 0
+
+
+def test_a_to_cname_transition_refuses_with_both_keys_allowlisted():
+    """Matrix complement of the CNAME→A case above: same create-before-delete
+    trap in the other direction — the CNAME's create is rejected while the
+    live A stands."""
+    edge = EdgeConfig(name="e", provider="azure", zone=Z,
+                      managed_keys=frozenset({(Z, "app", "A"), (Z, "app", "CNAME")}))
+    provider = FakeProvider([rec("app", "10.10.4.30")])
+    with pytest.raises(TypeConflictError, match="manage only the old type") as exc:
+        plan_edge(edge, [_cname("app", "new.target.example")], provider,
+                  truth_complete=True)
+    assert "desired CNAME vs edge A" in str(exc.value)
+    assert provider.apply_calls == 0
+
+
+def test_cname_to_a_transition_refuses_when_only_the_new_key_is_managed():
+    """Matrix complement of the A→CNAME case above: the old CNAME is not
+    allowlisted, so its DELETE can never even be planned."""
+    edge = EdgeConfig(name="e", provider="azure", zone=Z,
+                      managed_keys=frozenset({(Z, "app", "A")}))
+    provider = FakeProvider([_cname("app", "old.target.example")])
+    with pytest.raises(TypeConflictError, match="cannot converge"):
+        plan_edge(edge, [rec("app", "10.10.4.30")], provider, truth_complete=True)
+    assert provider.apply_calls == 0
+
+
+@pytest.mark.parametrize("attr", ["blocked_keys", "unparseable_keys"])
+def test_a_conflicting_record_hidden_from_actual_still_conflicts(attr):
+    """Azure excludes blocked/unparseable keys from `actual`, but the records
+    are still physically at the edge — a desired CNAME at that owner name
+    still cannot be created."""
+    edge = EdgeConfig(name="e", provider="azure", zone=Z,
+                      managed_keys=frozenset({(Z, "app", "CNAME")}))
+    provider = BlockingProvider([], **{attr: {(Z, "app", "A")}})
+    with pytest.raises(TypeConflictError, match="edge A"):
+        plan_edge(edge, [_cname("app", "target.example")], provider,
+                  truth_complete=True)
+    assert provider.apply_calls == 0
+
+
+def test_truth_side_cname_beside_a_at_one_owner_refuses():
+    """No edge involvement needed: truth carrying both types at one owner is
+    a plan that cannot be applied whichever record lands first."""
+    edge = EdgeConfig(name="e", provider="azure", zone=Z,
+                      managed_keys=frozenset({(Z, "app", "A"), (Z, "app", "CNAME")}))
+    provider = FakeProvider([])
+    with pytest.raises(TypeConflictError, match="truth carries A and CNAME"):
+        plan_edge(edge, [rec("app", "10.10.4.30"),
+                         _cname("app", "target.example")], provider,
+                  truth_complete=True)
+    assert provider.apply_calls == 0
+
+
+def test_converged_cname_beside_a_foreign_record_is_not_a_conflict():
+    """Cross-AI review of PR #20 (NEW-1): a managed CNAME already converged at
+    the edge must not be refused because a foreign record the reconciler
+    disclaims (an Azure VM auto-registered A, say) shares the owner name. The
+    preflight guards planned creates; a desired record whose type is already
+    present at the owner creates nothing."""
+    edge = EdgeConfig(name="e", provider="azure", zone=Z,
+                      managed_keys=frozenset({(Z, "app", "CNAME")}))
+    live = _cname("app", "target.example")
+    provider = BlockingProvider([live], blocked_keys={(Z, "app", "A")})
+    result = plan_edge(edge, [live], provider, truth_complete=True)
+    assert result.diff.is_converged
+
+
+def test_delete_only_cleanup_of_a_stale_cname_is_not_a_conflict():
+    """Cross-AI review of PR #20 (NEW-1): edge carries an A and a stale CNAME
+    at one owner, truth carries only the A. The plan is a DELETE and nothing
+    else — no create can be rejected, so the edge converges; refusing it would
+    strand the stale record forever."""
+    edge = EdgeConfig(name="e", provider="azure", zone=Z,
+                      managed_keys=frozenset({(Z, "app", "A"), (Z, "app", "CNAME")}))
+    live_a = rec("app", "10.10.4.30")
+    provider = FakeProvider([live_a, _cname("app", "stale.example")])
+    result = plan_edge(edge, [live_a], provider, truth_complete=True)
+    assert [r.rtype for r in result.diff.to_delete] == ["CNAME"]
+    assert not result.diff.to_add and not result.diff.to_update
+
+
+def test_same_type_update_is_not_a_conflict():
+    """A CNAME retargeting to a new value is an UPDATE at one key — the
+    preflight must not mistake the ordinary heal path for a transition."""
+    edge = EdgeConfig(name="e", provider="azure", zone=Z,
+                      managed_keys=frozenset({(Z, "demo", "CNAME")}))
+    provider = FakeProvider([_cname("demo", "old.example")])
+    result = plan_edge(edge, [_cname("demo", "new.example")], provider,
+                       truth_complete=True)
+    assert len(result.diff.to_update) == 1
+
+
+def test_non_cname_type_coexistence_is_not_a_conflict():
+    """An A and a TXT at one owner are legal DNS — only CNAME involvement
+    makes coexistence impossible."""
+    edge = EdgeConfig(name="e", provider="azure", zone=Z,
+                      managed_keys=frozenset({(Z, "app", "A")}))
+    txt = CanonicalRecord(zone=Z, name="app", rtype="TXT", values=("note",))
+    provider = FakeProvider([txt])
+    result = plan_edge(edge, [rec("app", "10.10.4.30")], provider,
+                       truth_complete=True)
+    assert [r.name for r in result.diff.to_add] == ["app"]

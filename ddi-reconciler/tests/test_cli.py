@@ -7,7 +7,7 @@ import types
 import pytest
 
 from ddi_reconciler import cli
-from ddi_reconciler.desired_file import _checksum
+from ddi_reconciler.desired_file import SNAPSHOT_VERSION, _checksum
 from ddi_reconciler.model import CanonicalRecord
 
 Z = "azure.dwsolution.co"
@@ -36,10 +36,13 @@ DB = {"zone": Z, "name": "db", "rtype": "A", "values": ["10.10.4.20"], "ttl": 30
 
 
 def snapshot(entries, *, truth_verified=True):
-    """A format-v1 snapshot body. Entries stay raw dicts so a deliberately
-    malformed one is still expressible."""
-    return json.dumps({"version": 1, "truth_verified": truth_verified,
-                       "count": len(entries), "checksum": _checksum(entries),
+    """A current-format snapshot body. Entries stay raw dicts so a
+    deliberately malformed one is still expressible. Version and checksum
+    track desired_file's own constants, so a format bump does not silently
+    turn every CLI test into a version-mismatch test."""
+    return json.dumps({"version": SNAPSHOT_VERSION, "truth_verified": truth_verified,
+                       "count": len(entries),
+                       "checksum": _checksum(entries, truth_verified=truth_verified),
                        "records": entries})
 
 
@@ -299,13 +302,14 @@ def test_partial_snapshot_refuses_to_delete_and_exits_1(pair_files, monkeypatch,
     assert {r.name for r in provider.actual} == {"app", "db"}
 
 
-def test_a_truncated_v1_snapshot_is_rejected_before_any_edge_is_touched(
+def test_a_truncated_snapshot_is_rejected_before_any_edge_is_touched(
         pair_files, monkeypatch, capsys):
     """A snapshot whose count disagrees with its records is damaged, and a
     damaged file is an error rather than a smaller truth."""
     config, desired = pair_files
-    desired.write_text(json.dumps({"version": 1, "truth_verified": True, "count": 2,
-                                   "checksum": _checksum([APP, DB]), "records": [APP]}))
+    desired.write_text(json.dumps({
+        "version": SNAPSHOT_VERSION, "truth_verified": True, "count": 2,
+        "checksum": _checksum([APP, DB], truth_verified=True), "records": [APP]}))
     provider = FakeProvider([record("app"), record("db", "10.10.4.20")])
     assert run_cli(monkeypatch, provider, config, desired, "--apply") == 1
     assert "declares 2 record(s) but carries 1" in capsys.readouterr().err
@@ -662,3 +666,62 @@ def test_an_unproven_spatium_read_deletes_with_the_explicit_opt_in(
     assert _run_spatium(monkeypatch, config, provider, read_verified=False,
                         extra=["--allow-unverified-truth"]) == 0
     assert [r.name for r in provider.actual] == ["app"]
+
+
+# --- WR-01 / CR-03: malformed config and refused transport exit 1 cleanly ---
+
+def test_a_string_spatium_section_exits_1_without_a_traceback(tmp_path, capsys):
+    """Valid TOML, wrong shape: `spatium = "bad"` used to escape as an
+    AttributeError traceback instead of the documented exit-1 error."""
+    config = tmp_path / "config.toml"
+    config.write_text('spatium = "bad"\n'
+                      + "[[edges]]" + CONFIG.split("[[edges]]", 1)[1])
+    assert cli.main(["--dry-run", "--config", str(config)]) == 1
+    err = capsys.readouterr().err
+    assert "must be a table" in err
+    assert "Traceback" not in err
+
+
+def test_a_numeric_base_url_exits_1_without_a_traceback(tmp_path, capsys):
+    config = tmp_path / "config.toml"
+    config.write_text("[spatium]\nbase_url = 8000\n"
+                      + "[[edges]]" + CONFIG.split("[[edges]]", 1)[1])
+    assert cli.main(["--dry-run", "--config", str(config)]) == 1
+    err = capsys.readouterr().err
+    assert "base_url" in err and "non-empty string" in err
+    assert "Traceback" not in err
+
+
+def test_plaintext_remote_spatium_with_token_exits_1(tmp_path, monkeypatch, capsys):
+    """CR-03 at the CLI boundary: the provider's construction-time refusal
+    must land as the documented operational error, not a traceback."""
+    config = tmp_path / "config.toml"
+    config.write_text('[spatium]\nbase_url = "http://spatium.internal:8000"\n'
+                      + "[[edges]]" + CONFIG.split("[[edges]]", 1)[1])
+    monkeypatch.setenv("SPATIUM_API_TOKEN", "sekrit")
+    # No provider fake: the refusal fires in _fetch_desired, at SpatiumProvider
+    # construction, before _build_providers is ever reached.
+    assert cli.main(["--dry-run", "--config", str(config)]) == 1
+    err = capsys.readouterr().err
+    # The refusal message specifically — the pre-fix code also printed the
+    # word "plaintext" (as a warning) and also exited 1 (on the ensuing
+    # connection failure), so only the refusal wording separates old from new.
+    assert "Refusing to start" in err
+    assert "Traceback" not in err
+
+
+def test_dry_run_type_conflict_exits_1_with_manual_transition_guidance(
+        files, monkeypatch, capsys):
+    """CR-04 at the CLI boundary (cross-AI review of PR #20): the runner's
+    TypeConflictError must land as the documented operational error — exit 1
+    with the manual-transition wording, no traceback — never as ordinary
+    drift (exit 2), which would tell the nightly a heal is possible."""
+    config, desired = files
+    stale = CanonicalRecord(zone=Z, name="app", rtype="CNAME",
+                            values=("stale.example",), ttl=300)
+    assert run_cli(monkeypatch, FakeProvider([stale]), config, desired,
+                   "--dry-run") == 1
+    err = capsys.readouterr().err
+    assert "record-type conflict" in err
+    assert "manual, two-session procedure" in err
+    assert "Traceback" not in err

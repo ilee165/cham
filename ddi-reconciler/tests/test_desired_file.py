@@ -113,6 +113,33 @@ def test_an_unknown_version_is_refused(tmp_path):
         load_desired(path)
 
 
+def test_a_non_integer_version_is_refused(tmp_path):
+    """Cross-AI review of PR #20: the checksum is computed from the constant,
+    not the file's field, so a float 2.0 (or a bool) used to slip through
+    Python equality with a checksum-clean file. Every integrity-bound field
+    must be the canonical type, not merely compare equal to it."""
+    path = tmp_path / "desired.json"
+    _save([_rec("a")], path)
+    body = json.loads(path.read_text())
+    body["version"] = float(SNAPSHOT_VERSION)      # json renders 2.0
+    path.write_text(json.dumps(body))
+    with pytest.raises(ValueError, match="snapshot version is 2.0"):
+        load_desired(path)
+
+
+def test_export_over_an_old_version_names_the_migration_not_the_shrink_flag(tmp_path):
+    """Cross-AI review of PR #20 (NEW-3): a version mismatch is a format
+    change, not record loss. The refusal must route to the sibling re-export
+    procedure and must not advertise --allow-snapshot-shrink, which the
+    remediation plan forbids as a version bypass."""
+    path = tmp_path / "desired.json"
+    path.write_text(json.dumps({"version": 1, "truth_verified": True, "count": 0,
+                                "checksum": "sha256:x", "records": []}))
+    with pytest.raises(SnapshotError, match="sibling") as exc:
+        _save([_rec("a")], path)
+    assert "--allow-snapshot-shrink does not apply" in str(exc.value)
+
+
 def test_a_bare_list_loads_but_is_not_verified(tmp_path, capsys):
     """The pre-v1 shape, and what a hand-written snapshot looks like. Readable,
     because refusing it would break a dry-run that never deletes — but it can
@@ -264,3 +291,54 @@ def test_a_non_integer_ttl_is_a_value_error_not_a_traceback(tmp_path, ttl):
                                  "values": ["1.1.1.1"], "ttl": ttl}]))
     with pytest.raises(ValueError, match="invalid snapshot"):
         load_desired(path)
+
+
+# --- CR-01: truth_verified is bound into the checksum ------------------------
+
+def test_flipping_truth_verified_alone_breaks_the_checksum(tmp_path):
+    """The review's exact attack: v1 hashed only the records, so editing a
+    checksum-clean snapshot from truth_verified false to true left the file
+    verifying — and that flag is deletion authority downstream."""
+    path = tmp_path / "desired.json"
+    _save([_rec("app")], path, truth_verified=False)
+    body = json.loads(path.read_text())
+    assert body["truth_verified"] is False
+    body["truth_verified"] = True  # the flip, nothing else
+    path.write_text(json.dumps(body))
+    with pytest.raises(ValueError, match="truth_verified"):
+        load_desired(path)
+
+
+def test_flipping_truth_verified_downward_also_breaks(tmp_path):
+    """Symmetric: the binding is integrity, not a one-way ratchet."""
+    path = tmp_path / "desired.json"
+    _save([_rec("app")], path, truth_verified=True)
+    body = json.loads(path.read_text())
+    body["truth_verified"] = False
+    path.write_text(json.dumps(body))
+    with pytest.raises(ValueError, match="checksum"):
+        load_desired(path)
+
+
+def test_a_v1_snapshot_is_rejected_naming_reexport(tmp_path):
+    """Legacy v1 files hash only their records, so their provenance flag is
+    unverifiable — they are refused outright rather than half-trusted. The
+    migration path is a re-export, and the error must say so."""
+    records = [{"zone": "z.co", "name": "app", "rtype": "A",
+                "values": ["1.1.1.1"], "ttl": 300}]
+    v1_canonical = json.dumps(records, sort_keys=True, separators=(",", ":"))
+    import hashlib
+    v1_checksum = "sha256:" + hashlib.sha256(v1_canonical.encode()).hexdigest()
+    path = tmp_path / "desired.json"
+    path.write_text(json.dumps({"version": 1, "truth_verified": True,
+                                "count": 1, "checksum": v1_checksum,
+                                "records": records}))
+    with pytest.raises(ValueError, match="re-export"):
+        load_desired(path)
+
+
+def test_round_trip_preserves_the_provenance_flag_both_ways(tmp_path):
+    for flag in (True, False):
+        path = tmp_path / f"desired-{flag}.json"
+        _save([_rec("app")], path, truth_verified=flag)
+        assert load_desired(path).verified is flag

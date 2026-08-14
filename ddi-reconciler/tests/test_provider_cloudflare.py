@@ -738,3 +738,67 @@ def test_aaaa_ipv6_normalization_in_value_updates():
     provider.apply(Diff(to_update=[RecordUpdate(desired=desired, actual=actual)]))
     assert created.call_count == 1
     assert deleted.call_count == 1
+
+
+# --- WR-02: a non-object JSON body must not escape as AttributeError ---------
+
+@responses.activate
+@pytest.mark.parametrize("raw", ["[]", '"unexpected"', "null", "3"],
+                         ids=["list", "string", "null", "number"])
+def test_a_non_object_success_body_is_a_named_api_error(raw):
+    """`200 []` is valid JSON; body.get() on it used to raise AttributeError,
+    bypassing the provider's RuntimeError and the CLI's exit-1 contract. The
+    bodies are registered as raw strings because the responses library treats
+    `json=None` as "no JSON", not as a JSON null."""
+    responses.get(f"{API}/zones?name={Z}", body=raw,
+                  content_type="application/json")
+    provider = CloudflareProvider(Z, "token")
+    with pytest.raises(RuntimeError, match="expected an object"):
+        provider.fetch_actual({Z})
+
+
+@responses.activate
+def test_a_non_object_error_body_is_also_named():
+    """The non-2xx branch reads body.get('errors') and must be guarded too."""
+    responses.get(f"{API}/zones?name={Z}", json=["boom"], status=502)
+    provider = CloudflareProvider(Z, "token")
+    with pytest.raises(RuntimeError, match="expected an object"):
+        provider.fetch_actual({Z})
+
+
+# --- WR-03: TTL validation runs for the whole diff before any write ----------
+
+@responses.activate
+def test_a_mixed_ttl_diff_writes_nothing():
+    """A valid first add and an invalid later add used to write the first
+    record and then deterministically fail on the second — avoidable partial
+    state, discovered only after the mutation had landed."""
+    register_zone()
+    register_records([])
+    provider = CloudflareProvider(Z, "token")
+    provider.fetch_actual({Z})
+    created = responses.post(f"{API}/zones/zid/dns_records",
+                             json={"success": True, "result": {}})
+    good = CanonicalRecord(zone=Z, name="ok", rtype="A", values=("1.1.1.1",), ttl=300)
+    bad = CanonicalRecord(zone=Z, name="broken", rtype="A", values=("1.1.1.2",), ttl=0)
+    with pytest.raises(RuntimeError, match="cloudflare rejects ttl=0"):
+        provider.apply(Diff(to_add=[good, bad]))
+    assert created.call_count == 0  # not even the valid record was written
+
+
+@responses.activate
+def test_an_invalid_update_ttl_also_blocks_the_whole_diff():
+    register_zone()
+    register_records([{"id": "r1", "type": "A", "name": f"upd.{Z}",
+                       "content": "1.1.1.1", "ttl": 300, "proxied": False}])
+    provider = CloudflareProvider(Z, "token")
+    actual = provider.fetch_actual({Z})
+    have = next(r for r in actual if r.name == "upd")
+    created = responses.post(f"{API}/zones/zid/dns_records",
+                             json={"success": True, "result": {}})
+    good = CanonicalRecord(zone=Z, name="new", rtype="A", values=("2.2.2.2",), ttl=300)
+    want = CanonicalRecord(zone=Z, name="upd", rtype="A", values=("9.9.9.9",), ttl=0)
+    with pytest.raises(RuntimeError, match="cloudflare rejects ttl=0"):
+        provider.apply(Diff(to_add=[good],
+                            to_update=[RecordUpdate(desired=want, actual=have)]))
+    assert created.call_count == 0

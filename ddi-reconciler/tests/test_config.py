@@ -152,3 +152,53 @@ def test_repo_config_toml_is_valid():
     repo_config = Path(__file__).parent.parent / "config.toml"
     config = load_config(repo_config)
     assert {e.name for e in config.edges} == {"azure-private", "cloudflare-public"}
+
+
+# --- WR-01: provider sections are schema-validated ---------------------------
+
+EDGE_ONLY = """
+[[edges]]
+name = "cloudflare-public"
+provider = "cloudflare"
+zone = "dwsolution.co"
+managed_keys = [["dwsolution.co", "demo", "CNAME"]]
+"""
+
+
+def test_a_string_spatium_section_is_config_error_not_attributeerror(tmp_path):
+    """`spatium = "bad"` is valid TOML; it used to reach .get() on a str and
+    escape as an AttributeError traceback instead of the exit-1 contract."""
+    path = tmp_path / "config.toml"
+    path.write_text('spatium = "bad"\n' + EDGE_ONLY)
+    with pytest.raises(ConfigError, match=r"\[spatium\] must be a table"):
+        load_config(path)
+
+
+def test_a_string_azure_section_is_config_error(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('azure = 3\n' + EDGE_ONLY)
+    with pytest.raises(ConfigError, match=r"\[azure\] must be a table"):
+        load_config(path)
+
+
+def test_a_non_list_edges_value_is_config_error(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('edges = "azure"\n')
+    with pytest.raises(ConfigError, match="'edges' must be an array"):
+        load_config(path)
+
+
+def test_a_numeric_base_url_is_config_error_not_a_late_rstrip_crash(tmp_path):
+    """A wrong-typed base_url used to survive loading and explode later in
+    .rstrip() inside the provider — far from the actual mistake."""
+    path = tmp_path / "config.toml"
+    path.write_text('[spatium]\nbase_url = 8000\n' + EDGE_ONLY)
+    with pytest.raises(ConfigError, match="base_url.*non-empty string"):
+        load_config(path)
+
+
+def test_an_empty_resource_group_is_config_error(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[azure]\nresource_group = "  "\n' + EDGE_ONLY)
+    with pytest.raises(ConfigError, match="resource_group.*non-empty string"):
+        load_config(path)
