@@ -113,6 +113,33 @@ def test_an_unknown_version_is_refused(tmp_path):
         load_desired(path)
 
 
+def test_a_non_integer_version_is_refused(tmp_path):
+    """Cross-AI review of PR #20: the checksum is computed from the constant,
+    not the file's field, so a float 2.0 (or a bool) used to slip through
+    Python equality with a checksum-clean file. Every integrity-bound field
+    must be the canonical type, not merely compare equal to it."""
+    path = tmp_path / "desired.json"
+    _save([_rec("a")], path)
+    body = json.loads(path.read_text())
+    body["version"] = float(SNAPSHOT_VERSION)      # json renders 2.0
+    path.write_text(json.dumps(body))
+    with pytest.raises(ValueError, match="snapshot version is 2.0"):
+        load_desired(path)
+
+
+def test_export_over_an_old_version_names_the_migration_not_the_shrink_flag(tmp_path):
+    """Cross-AI review of PR #20 (NEW-3): a version mismatch is a format
+    change, not record loss. The refusal must route to the sibling re-export
+    procedure and must not advertise --allow-snapshot-shrink, which the
+    remediation plan forbids as a version bypass."""
+    path = tmp_path / "desired.json"
+    path.write_text(json.dumps({"version": 1, "truth_verified": True, "count": 0,
+                                "checksum": "sha256:x", "records": []}))
+    with pytest.raises(SnapshotError, match="sibling") as exc:
+        _save([_rec("a")], path)
+    assert "--allow-snapshot-shrink does not apply" in str(exc.value)
+
+
 def test_a_bare_list_loads_but_is_not_verified(tmp_path, capsys):
     """The pre-v1 shape, and what a hand-written snapshot looks like. Readable,
     because refusing it would break a dry-run that never deletes — but it can

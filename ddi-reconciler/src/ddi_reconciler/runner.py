@@ -174,9 +174,18 @@ def _check_type_conflicts(edge: EdgeConfig, desired: list[CanonicalRecord],
 
     * desired-vs-desired — truth carries a CNAME and a non-CNAME at the same
       owner. No edge involvement needed; whichever lands first, the second
-      write is rejected, so the plan is unappliable as written.
-    * desired-vs-observed — a desired record's owner name already carries a
-      different type at the edge where either side is a CNAME. "Observed" is
+      write is rejected, so the plan is unappliable as written. `desired` here
+      is deliberately the managed set, post-partition: an unmanaged truth
+      record is disclaimed and never written, so it cannot make the plan
+      unappliable — and if it is physically at the edge, the observed scan
+      below catches it.
+    * desired-vs-observed — a desired record that would be CREATED (its type
+      is absent at its owner name) where the owner already carries a
+      different type and either side is a CNAME. Only creates are gated: a
+      desired record whose type is already present at the owner is converged
+      or an ordinary update, and a foreign record coexisting beside it is
+      disclaimed, not a conflict — flagging those refused cleanly-convergent
+      plans, including a delete-only cleanup of a stale CNAME. "Observed" is
       every key the provider saw, not just the records in `actual`: a record
       the provider excluded as blocked (Azure VM auto-registration) or
       unparseable is still physically present at the edge and still collides.
@@ -196,9 +205,10 @@ def _check_type_conflicts(edge: EdgeConfig, desired: list[CanonicalRecord],
         f"{record.zone}/{record.name}: desired {record.rtype} vs edge "
         f"{' and '.join(sorted(others))}"
         for record in desired
+        for observed in [observed_by_owner.get((record.zone, record.name), set())]
+        if record.rtype not in observed
         for others in [
-            {rtype for rtype in observed_by_owner.get((record.zone, record.name), set())
-             if rtype != record.rtype and ("CNAME" in (rtype, record.rtype))}
+            {rtype for rtype in observed if "CNAME" in (rtype, record.rtype)}
         ]
         if others)
 

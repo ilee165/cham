@@ -5,10 +5,10 @@ to ddi-reconciler/desired-records.json and drift runs compare edges against
 that committed snapshot (ADR-006).
 
 The snapshot is a delete order for everything it omits, so it has to be able to
-prove it arrived whole. Format v1 is therefore self-describing:
+prove it arrived whole. Format v2 is therefore self-describing:
 
     {
-      "version": 1,
+      "version": 2,
       "truth_verified": true,
       "count": 2,
       "checksum": "sha256:<hex>",
@@ -57,6 +57,15 @@ SNAPSHOT_VERSION = 2
 
 class SnapshotError(RuntimeError):
     """A snapshot write was refused because it would lose records."""
+
+
+class SnapshotVersionError(ValueError):
+    """The envelope is well-formed but written in a different snapshot format.
+
+    Distinct from a plain ValueError so _prior_count can route it to the
+    migration procedure (re-export to a sibling path) instead of the damage
+    message, whose --allow-snapshot-shrink advice authorizes record loss and
+    must never read as the way past a format change."""
 
 
 class DesiredSnapshot(NamedTuple):
@@ -137,13 +146,19 @@ def _prior_count(path: Path) -> int | None:
         raise unreadable(f"it holds a JSON {type(body).__name__}, not a snapshot")
     try:
         _verify_envelope(body)
+    except SnapshotVersionError as exc:
+        raise SnapshotError(
+            f"refusing to overwrite {path}: {exc}. A version mismatch is a format "
+            "change, not record loss — migrate by exporting to a sibling path, "
+            "verifying it, and moving it over this file; --allow-snapshot-shrink "
+            "does not apply and would authorize losing records.") from exc
     except ValueError as exc:
         raise unreadable(str(exc)) from exc
     return len(body["records"])
 
 
 def _verify_envelope(body: dict) -> None:
-    """Check a v1 envelope's integrity. Raises ValueError describing the break.
+    """Check a snapshot envelope's integrity. Raises ValueError on the break.
 
     This is the check that turns a shorter file from "a smaller truth" into
     "a damaged file": count and checksum are both re-derived from the records
@@ -151,9 +166,13 @@ def _verify_envelope(body: dict) -> None:
     all caught. A legitimate removal goes through --export, which rewrites the
     records and both integrity fields together.
     """
+    # Type-checked, not merely compared: the checksum is computed from the
+    # SNAPSHOT_VERSION constant, so a float 2.0 or bool in the file would pass
+    # Python equality with a checksum-clean file (cross-AI review of PR #20).
     version = body.get("version")
-    if version != SNAPSHOT_VERSION:
-        raise ValueError(
+    if isinstance(version, bool) or not isinstance(version, int) \
+            or version != SNAPSHOT_VERSION:
+        raise SnapshotVersionError(
             f"snapshot version is {version!r}, expected {SNAPSHOT_VERSION} — re-export it "
             "with a matching cham-reconcile")
     records = body.get("records")
@@ -186,7 +205,7 @@ def _verify_envelope(body: dict) -> None:
 
 def save_desired(records: list[CanonicalRecord], path: Path, *,
                  truth_verified: bool, allow_shrink: bool = False) -> None:
-    """Write a v1 snapshot atomically.
+    """Write a current-format snapshot atomically.
 
     `truth_verified` travels with the data: it is the caller's answer to "could
     the read behind these records be proven complete?", and load_desired hands

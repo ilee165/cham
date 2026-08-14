@@ -521,6 +521,34 @@ def test_truth_side_cname_beside_a_at_one_owner_refuses():
     assert provider.apply_calls == 0
 
 
+def test_converged_cname_beside_a_foreign_record_is_not_a_conflict():
+    """Cross-AI review of PR #20 (NEW-1): a managed CNAME already converged at
+    the edge must not be refused because a foreign record the reconciler
+    disclaims (an Azure VM auto-registered A, say) shares the owner name. The
+    preflight guards planned creates; a desired record whose type is already
+    present at the owner creates nothing."""
+    edge = EdgeConfig(name="e", provider="azure", zone=Z,
+                      managed_keys=frozenset({(Z, "app", "CNAME")}))
+    live = _cname("app", "target.example")
+    provider = BlockingProvider([live], blocked_keys={(Z, "app", "A")})
+    result = plan_edge(edge, [live], provider, truth_complete=True)
+    assert result.diff.is_converged
+
+
+def test_delete_only_cleanup_of_a_stale_cname_is_not_a_conflict():
+    """Cross-AI review of PR #20 (NEW-1): edge carries an A and a stale CNAME
+    at one owner, truth carries only the A. The plan is a DELETE and nothing
+    else — no create can be rejected, so the edge converges; refusing it would
+    strand the stale record forever."""
+    edge = EdgeConfig(name="e", provider="azure", zone=Z,
+                      managed_keys=frozenset({(Z, "app", "A"), (Z, "app", "CNAME")}))
+    live_a = rec("app", "10.10.4.30")
+    provider = FakeProvider([live_a, _cname("app", "stale.example")])
+    result = plan_edge(edge, [live_a], provider, truth_complete=True)
+    assert [r.rtype for r in result.diff.to_delete] == ["CNAME"]
+    assert not result.diff.to_add and not result.diff.to_update
+
+
 def test_same_type_update_is_not_a_conflict():
     """A CNAME retargeting to a new value is an UPDATE at one key — the
     preflight must not mistake the ordinary heal path for a transition."""

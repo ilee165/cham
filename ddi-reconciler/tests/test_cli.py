@@ -699,12 +699,29 @@ def test_plaintext_remote_spatium_with_token_exits_1(tmp_path, monkeypatch, caps
     config.write_text('[spatium]\nbase_url = "http://spatium.internal:8000"\n'
                       + "[[edges]]" + CONFIG.split("[[edges]]", 1)[1])
     monkeypatch.setenv("SPATIUM_API_TOKEN", "sekrit")
-    monkeypatch.setattr(cli, "_build_providers",
-                        lambda cfg, edges=None: {"azure-private": FakeProvider([])})
+    # No provider fake: the refusal fires in _fetch_desired, at SpatiumProvider
+    # construction, before _build_providers is ever reached.
     assert cli.main(["--dry-run", "--config", str(config)]) == 1
     err = capsys.readouterr().err
     # The refusal message specifically — the pre-fix code also printed the
     # word "plaintext" (as a warning) and also exited 1 (on the ensuing
     # connection failure), so only the refusal wording separates old from new.
     assert "Refusing to start" in err
+    assert "Traceback" not in err
+
+
+def test_dry_run_type_conflict_exits_1_with_manual_transition_guidance(
+        files, monkeypatch, capsys):
+    """CR-04 at the CLI boundary (cross-AI review of PR #20): the runner's
+    TypeConflictError must land as the documented operational error — exit 1
+    with the manual-transition wording, no traceback — never as ordinary
+    drift (exit 2), which would tell the nightly a heal is possible."""
+    config, desired = files
+    stale = CanonicalRecord(zone=Z, name="app", rtype="CNAME",
+                            values=("stale.example",), ttl=300)
+    assert run_cli(monkeypatch, FakeProvider([stale]), config, desired,
+                   "--dry-run") == 1
+    err = capsys.readouterr().err
+    assert "record-type conflict" in err
+    assert "manual, two-session procedure" in err
     assert "Traceback" not in err
