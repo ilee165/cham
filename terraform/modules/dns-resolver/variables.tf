@@ -33,14 +33,90 @@ variable "forwarding_vnet_links" {
   type        = map(string)
 }
 
+variable "hub_address_space" {
+  description = "Hub VNet CIDR. WR-06: both resolver subnets are carved from this range, so containment is provable here — where the subnets are created — instead of failing at Azure apply inside a cost-gated resolver session."
+  type        = string
+}
+
+variable "hub_reserved_subnet_cidrs" {
+  description = "Hub subnets that already exist in the VNet (VPN, shared). WR-06: the resolver subnets must not collide with them. No default on purpose: an omitted list would make the collision validations vacuously pass, so callers must state the reserved set explicitly (pass [] only for a genuinely empty VNet)."
+  type        = list(string)
+}
+
 variable "inbound_subnet_cidr" {
   type    = string
   default = "10.10.2.0/28"
+
+  validation {
+    condition = try(
+      tonumber(split("/", var.inbound_subnet_cidr)[1]) >= tonumber(split("/", var.hub_address_space)[1]) &&
+      cidrsubnet(format("%s/%s", split("/", var.inbound_subnet_cidr)[0], split("/", var.hub_address_space)[1]), 0, 0)
+      == cidrsubnet(var.hub_address_space, 0, 0),
+    false)
+    error_message = "inbound_subnet_cidr must be a valid IPv4 CIDR contained within hub_address_space — the inbound subnet is carved from the hub VNet, and Azure rejects out-of-range subnets only at apply time."
+  }
+
+  validation {
+    condition = !try(
+      cidrsubnet(format("%s/%d", split("/", var.inbound_subnet_cidr)[0], min(
+        tonumber(split("/", var.inbound_subnet_cidr)[1]),
+        tonumber(split("/", var.outbound_subnet_cidr)[1]),
+      )), 0, 0)
+      == cidrsubnet(format("%s/%d", split("/", var.outbound_subnet_cidr)[0], min(
+        tonumber(split("/", var.inbound_subnet_cidr)[1]),
+        tonumber(split("/", var.outbound_subnet_cidr)[1]),
+      )), 0, 0),
+    true)
+    error_message = "inbound_subnet_cidr must not overlap outbound_subnet_cidr — each resolver endpoint needs its own delegated subnet, and an overlap plans cleanly and fails at Azure apply."
+  }
+
+  validation {
+    condition = alltrue([
+      for reserved in var.hub_reserved_subnet_cidrs :
+      !try(
+        cidrsubnet(format("%s/%d", split("/", var.inbound_subnet_cidr)[0], min(
+          tonumber(split("/", var.inbound_subnet_cidr)[1]),
+          tonumber(split("/", reserved)[1]),
+        )), 0, 0)
+        == cidrsubnet(format("%s/%d", split("/", reserved)[0], min(
+          tonumber(split("/", var.inbound_subnet_cidr)[1]),
+          tonumber(split("/", reserved)[1]),
+        )), 0, 0),
+      true)
+    ])
+    error_message = "inbound_subnet_cidr must not overlap any hub_reserved_subnet_cidrs entry (the hub's VPN and shared subnets) — the collision plans cleanly and fails at Azure apply."
+  }
 }
 
 variable "outbound_subnet_cidr" {
   type    = string
   default = "10.10.2.16/28"
+
+  validation {
+    condition = try(
+      tonumber(split("/", var.outbound_subnet_cidr)[1]) >= tonumber(split("/", var.hub_address_space)[1]) &&
+      cidrsubnet(format("%s/%s", split("/", var.outbound_subnet_cidr)[0], split("/", var.hub_address_space)[1]), 0, 0)
+      == cidrsubnet(var.hub_address_space, 0, 0),
+    false)
+    error_message = "outbound_subnet_cidr must be a valid IPv4 CIDR contained within hub_address_space — the outbound subnet is carved from the hub VNet, and Azure rejects out-of-range subnets only at apply time."
+  }
+
+  validation {
+    condition = alltrue([
+      for reserved in var.hub_reserved_subnet_cidrs :
+      !try(
+        cidrsubnet(format("%s/%d", split("/", var.outbound_subnet_cidr)[0], min(
+          tonumber(split("/", var.outbound_subnet_cidr)[1]),
+          tonumber(split("/", reserved)[1]),
+        )), 0, 0)
+        == cidrsubnet(format("%s/%d", split("/", reserved)[0], min(
+          tonumber(split("/", var.outbound_subnet_cidr)[1]),
+          tonumber(split("/", reserved)[1]),
+        )), 0, 0),
+      true)
+    ])
+    error_message = "outbound_subnet_cidr must not overlap any hub_reserved_subnet_cidrs entry (the hub's VPN and shared subnets) — the collision plans cleanly and fails at Azure apply."
+  }
 }
 
 variable "lab_zone" { type = string }
