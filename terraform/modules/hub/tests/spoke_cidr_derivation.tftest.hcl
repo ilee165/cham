@@ -15,8 +15,9 @@ variables {
   ssh_public_key       = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA plan-test"
   onprem_address_space = "192.168.50.0/24"
   onprem_dns_ip        = "192.168.50.2"
-  wg_peer_public_key   = "PlanOnlyTestPeerPublicKeyNotARealCredential0="
-  lab_zone             = "lab.example.test"
+  # 43 base64 chars + '=' (WR-07 shape) — self-describingly not a credential.
+  wg_peer_public_key = "PlanOnlyTestPeerPublicKeyNotRealCredential0="
+  lab_zone           = "lab.example.test"
   # One spoke far outside 10.10.0.0/16 plus one inside it: every derived rule
   # must carry both.
   spoke_address_spaces         = ["192.168.60.0/24", "10.10.4.0/24"]

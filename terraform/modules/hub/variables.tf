@@ -283,8 +283,13 @@ variable "onprem_dns_ip" {
 }
 
 variable "wg_peer_public_key" {
-  description = "Laptop WireGuard public key (public keys are safe to commit)"
+  description = "Laptop WireGuard public key (public keys are safe to commit). WR-07: shape-validated here as well as in the calling root — this module renders the value straight into cloud-init."
   type        = string
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9+/]{43}=$", var.wg_peer_public_key))
+    error_message = "wg_peer_public_key must be a base64-encoded 32-byte WireGuard public key — exactly 43 base64 characters followed by '=' (e.g. the output of `wg pubkey`). An empty or malformed value would plan cleanly, bill the hub VM, and fail WireGuard setup on first boot."
+  }
 }
 
 variable "tags" {

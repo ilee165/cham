@@ -123,7 +123,15 @@ variable "wg_transfer_cidr" {
   }
 }
 
-variable "wg_peer_public_key" { type = string }
+variable "wg_peer_public_key" {
+  description = "Laptop WireGuard public key (public keys are safe to commit). WR-07: shape-validated so a never-set CI secret dies at plan time instead of billing a hub VM whose WireGuard config fails on first boot."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9+/]{43}=$", var.wg_peer_public_key))
+    error_message = "wg_peer_public_key must be a base64-encoded 32-byte WireGuard public key — exactly 43 base64 characters followed by '=' (e.g. the output of `wg pubkey`). An empty or malformed value would plan cleanly, bill the hub VM, and fail WireGuard setup on first boot."
+  }
+}
 
 variable "enable_private_resolver" {
   description = "Cost-bearing Azure DNS Private Resolver feature. Keep false during Phase 2."
