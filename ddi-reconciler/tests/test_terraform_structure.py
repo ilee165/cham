@@ -61,3 +61,28 @@ def test_dns_resolver_depends_on_both_spoke_modules():
         assert re.search(rf"{re.escape(module)}\s*[,\]\s]", deps + "]"), (
             f"module \"dns_resolver\" depends_on does not include {module}"
         )
+
+
+def test_every_vm_image_version_is_pinned():
+    """WR-05: a floating ``version = "latest"`` lets a marketplace publish
+    change what an already-reviewed plan deploys. Every source_image_reference
+    must pin an explicit version; bumps arrive deliberately via PR.
+
+    Fails when no source_image_reference exists at all — a pin with nothing
+    to pin is a broken guard, not a passing one.
+    """
+    blocks = []
+    for tf in sorted(TERRAFORM_DIR.rglob("*.tf")):
+        text = tf.read_text(encoding="utf-8")
+        for match in re.finditer(
+            r"source_image_reference\s*\{([^}]*)\}", text, re.DOTALL
+        ):
+            blocks.append((tf, match.group(1)))
+    assert blocks, f"no source_image_reference blocks found under {TERRAFORM_DIR}"
+    for tf, body in blocks:
+        version = re.search(r'version\s*=\s*"([^"]*)"', body)
+        assert version, f"{tf}: source_image_reference has no version attribute"
+        assert version.group(1).lower() != "latest", (
+            f"{tf}: source_image_reference floats on version=latest — "
+            "pin the exact marketplace version (WR-05)"
+        )
