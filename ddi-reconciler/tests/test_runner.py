@@ -469,6 +469,31 @@ def test_a_to_cname_transition_refuses_when_only_the_new_key_is_managed():
     assert provider.apply_calls == 0
 
 
+def test_a_to_cname_transition_refuses_with_both_keys_allowlisted():
+    """Matrix complement of the CNAME→A case above: same create-before-delete
+    trap in the other direction — the CNAME's create is rejected while the
+    live A stands."""
+    edge = EdgeConfig(name="e", provider="azure", zone=Z,
+                      managed_keys=frozenset({(Z, "app", "A"), (Z, "app", "CNAME")}))
+    provider = FakeProvider([rec("app", "10.10.4.30")])
+    with pytest.raises(TypeConflictError, match="manage only the old type") as exc:
+        plan_edge(edge, [_cname("app", "new.target.example")], provider,
+                  truth_complete=True)
+    assert "desired CNAME vs edge A" in str(exc.value)
+    assert provider.apply_calls == 0
+
+
+def test_cname_to_a_transition_refuses_when_only_the_new_key_is_managed():
+    """Matrix complement of the A→CNAME case above: the old CNAME is not
+    allowlisted, so its DELETE can never even be planned."""
+    edge = EdgeConfig(name="e", provider="azure", zone=Z,
+                      managed_keys=frozenset({(Z, "app", "A")}))
+    provider = FakeProvider([_cname("app", "old.target.example")])
+    with pytest.raises(TypeConflictError, match="cannot converge"):
+        plan_edge(edge, [rec("app", "10.10.4.30")], provider, truth_complete=True)
+    assert provider.apply_calls == 0
+
+
 @pytest.mark.parametrize("attr", ["blocked_keys", "unparseable_keys"])
 def test_a_conflicting_record_hidden_from_actual_still_conflicts(attr):
     """Azure excludes blocked/unparseable keys from `actual`, but the records
@@ -480,6 +505,7 @@ def test_a_conflicting_record_hidden_from_actual_still_conflicts(attr):
     with pytest.raises(TypeConflictError, match="edge A"):
         plan_edge(edge, [_cname("app", "target.example")], provider,
                   truth_complete=True)
+    assert provider.apply_calls == 0
 
 
 def test_truth_side_cname_beside_a_at_one_owner_refuses():

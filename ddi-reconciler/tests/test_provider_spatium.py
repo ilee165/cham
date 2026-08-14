@@ -697,3 +697,34 @@ def test_malformed_page_metadata_taints_even_with_a_clean_total():
     provider = SpatiumProvider(BASE, token="t")
     provider.fetch_desired({"test.zone"})
     assert provider.read_verified is False
+
+
+@responses.activate
+def test_a_malformed_key_beside_an_explicit_next_link_still_taints():
+    """The letter of the latch: 'any recognized key on any page'. An explicit
+    next-link decides the walk before the page-number branches would ever
+    consult `page` — but a page number that cannot be parsed is still
+    malformed metadata, and it used to escape the latch entirely because the
+    link branch returned before anything else was parsed."""
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a")], "total": 2,
+                                 "next": f"{RECORDS}?page=2", "page": "one"})
+    responses.get(RECORDS, json={"items": [rec("b", "10.0.0.2")], "total": 2,
+                                 "next": None, "page": 2})
+    provider = SpatiumProvider(BASE, token="t")
+    records = provider.fetch_desired({"test.zone"})
+    assert {r.name for r in records} == {"a", "b"}  # walk fine, total matched
+    assert provider.read_verified is False
+
+
+@responses.activate
+def test_a_malformed_page_size_under_a_valid_pages_branch_still_taints():
+    """Same escape through the page-count branch: `pages` navigates, so the
+    walk never needed `page_size` — but a page_size that is not a canonical
+    integer is still malformed metadata on this page."""
+    one_group_one_zone()
+    responses.get(RECORDS, json={"items": [rec("a")], "total": 1, "pages": 1,
+                                 "page": 1, "page_size": "one hundred"})
+    provider = SpatiumProvider(BASE, token="t")
+    provider.fetch_desired({"test.zone"})
+    assert provider.read_verified is False

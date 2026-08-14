@@ -277,20 +277,25 @@ class SpatiumProvider:
         poisons verification for the whole fetch. Walking on regardless is
         safe because the walk's OUTPUT is only ever certified by the
         verification verdict; an unverified read cannot authorize deletion.
+
+        Every recognized field is parsed up front, before any navigation
+        branch returns: the latch covers "any recognized key on any page", so
+        a malformed `page` beside an explicit next-link — or a malformed
+        `page_size` under a page-count branch that never consults it — must
+        taint the fetch even though navigation never needed the value.
         """
-        malformed = False
+        pages, bad_pages = _first_int(body, PAGE_COUNT_KEYS)
+        current_page, bad_page = _first_int_field(body, PAGE_KEYS)
+        size, bad_size = _first_int_field(body, LIMIT_KEYS)
+        offset, bad_offset = _first_int(body, OFFSET_KEYS)
+        malformed = bad_pages or bad_page or bad_size or bad_offset
         has_link, link = self._explicit_next(body, current_url, path)
         if has_link:
             return link, malformed
         # Page-numbered envelope that declares how many pages there are
         # (fastapi-pagination Page: page/pages/size).
-        pages, bad = _first_int(body, PAGE_COUNT_KEYS)
-        malformed = malformed or bad
         if pages is not None:
-            current, bad = _first_int(body, PAGE_KEYS)
-            malformed = malformed or bad
-            if current is None:
-                current = page_number
+            current = page_number if current_page is None else current_page[1]
             next_url = (None if current >= pages
                         else _with_query(current_url, {"page": current + 1}))
             return next_url, malformed
@@ -299,25 +304,17 @@ class SpatiumProvider:
         # link, so the total is the only thing that says another page exists.
         # An empty page ends the walk even with the total unmet; the short-read
         # check below is what turns that into an error.
-        current_page, bad = _first_int_field(body, PAGE_KEYS)
-        malformed = malformed or bad
         if current_page is not None and total is not None and consumed < total and page_len:
             params = {"page": current_page[1] + 1}
-            size, bad = _first_int_field(body, LIMIT_KEYS)
-            malformed = malformed or bad
             if size is not None:
                 params[size[0]] = size[1]
             return _with_query(current_url, params), malformed
         # Offset/limit envelope (fastapi-pagination LimitOffsetPage), inferred
         # from the declared total: there is more to read and no link to it.
         if total is not None and consumed < total and page_len:
-            offset, bad = _first_int(body, OFFSET_KEYS)
-            malformed = malformed or bad
-            limit, bad = _first_int(body, LIMIT_KEYS)
-            malformed = malformed or bad
             return _with_query(current_url, {
                 "offset": (consumed - page_len if offset is None else offset) + page_len,
-                "limit": page_len if limit is None else limit}), malformed
+                "limit": page_len if size is None else size[1]}), malformed
         return None, malformed
 
     def _read(self, path: str) -> list:
