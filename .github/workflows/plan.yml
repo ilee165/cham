@@ -57,16 +57,16 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: "~1.9.0"
 
       - name: Terraform format
         run: terraform fmt -check -recursive terraform
 
-      - uses: terraform-linters/setup-tflint@v4
+      - uses: terraform-linters/setup-tflint@90f302c255ef959cbfb4bd10581afecdb7ece3e6 # v4.1.1
 
       - name: TFLint
         env:
@@ -88,12 +88,21 @@ jobs:
         run: tflint --init && tflint --recursive
         working-directory: terraform
 
+      # WR-04: bridgecrewio/checkov-action@v12 (v12.3117.0) resolves to
+      # `docker://ghcr.io/bridgecrewio/checkov:3.3.11` — a mutable image tag,
+      # so even a SHA-pinned action re-resolves its container on every run.
+      # Run the same image by immutable digest instead. The image entrypoint
+      # reads only INPUT_* variables (github_action_resources/entrypoint.sh in
+      # bridgecrewio/checkov), so the env block below reproduces exactly what
+      # the action wrapper passed, action-input defaults included.
       - name: Checkov
-        uses: bridgecrewio/checkov-action@v12
-        with:
-          directory: terraform
-          quiet: true
-          soft_fail: false
+        uses: docker://ghcr.io/bridgecrewio/checkov@sha256:e5e308e713725e73f517e4cb85b39d467f1e047204c174fb15eb444c27ffb745 # checkov 3.3.11
+        env:
+          INPUT_DIRECTORY: terraform
+          INPUT_QUIET: "true"
+          INPUT_SOFT_FAIL: "false"
+          INPUT_OUTPUT_FORMAT: sarif
+          INPUT_LOG_LEVEL: WARNING
 
       - name: Terraform validate without a backend or Azure credentials
         shell: bash
@@ -114,6 +123,14 @@ jobs:
       && inputs.stack == 'lab'
     needs: static
     runs-on: ubuntu-latest
+    # CR-08 (2026-08-13 review): saved-plan jobs join the shared mutation
+    # group — a plan created while an apply is in flight passes its freshness
+    # check against a main the apply has not yet reconciled with reality.
+    # cancel-in-progress stays false so a queued run can never kill a
+    # half-finished apply. The `static` PR check deliberately stays out.
+    concurrency:
+      group: terraform-mutations
+      cancel-in-progress: false
     permissions:
       id-token: write
       contents: read
@@ -129,14 +146,14 @@ jobs:
         working-directory: terraform/envs/lab
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: "~1.9.0"
 
       - name: Azure login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -280,7 +297,7 @@ jobs:
           rm -f tfplan plan-output.txt
 
       - name: Upload sanitized plan-manifest artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: terraform-plan-${{ github.sha }}
           path: |
@@ -314,6 +331,10 @@ jobs:
       && inputs.stack == 'cloudflare'
     needs: static
     runs-on: ubuntu-latest
+    # CR-08: same shared mutation group as every other state-touching job.
+    concurrency:
+      group: terraform-mutations
+      cancel-in-progress: false
     permissions:
       id-token: write
       contents: read
@@ -329,16 +350,16 @@ jobs:
         working-directory: terraform/cloudflare
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: "~1.9.0"
 
       # Azure, in a Cloudflare job, because the Terraform state for this stack
       # lives in the same private account as the lab stack's.
       - name: Azure login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -457,7 +478,7 @@ jobs:
           rm -f cloudflare.tfplan cloudflare-plan-output.txt
 
       - name: Upload sanitized Cloudflare plan-manifest artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cloudflare-plan-${{ github.sha }}
           path: |

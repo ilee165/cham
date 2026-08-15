@@ -157,19 +157,19 @@ Branch: `fix/review-terraform`. Verification: fmt/validate/tflint/checkov + tfte
 
 Branch: `fix/review-workflows`. Verification: actionlint + `test_workflow_gates.py`.
 
-- [ ] **B1 (CR-08): freshness immediately before a dedicated apply-only step.**
+- [x] **B1 (CR-08): freshness immediately before a dedicated apply-only step.**
   In `apply.yml` (both jobs) and `destroy.yml` (apply-destroy job): split
   `terraform init` from `terraform apply` into separate steps, and place the
   re-verify step — `git fetch origin main` + compare `inputs.source_commit`,
   abort with the existing "main moved" message — IMMEDIATELY before the
   apply-only step, after init and every other preparatory action. The early
   check stays (fast feedback); the adjacent check is the enforcement.
-- [ ] **B2 (CR-08): mutation concurrency exclusion.** One shared
+- [x] **B2 (CR-08): mutation concurrency exclusion.** One shared
   `concurrency: { group: terraform-mutations, cancel-in-progress: false }` on
   the mutation jobs of plan/apply/destroy (saved-plan jobs included — a plan
   mid-apply is the TOCTOU seam). NOT on the PR-triggered `static`/`tests` jobs,
   which must keep running in parallel on PRs.
-- [ ] **B3 (WR-04): SHA-pin every executable input.** All `uses:` entries
+- [x] **B3 (WR-04): SHA-pin every executable input.** All `uses:` entries
   across the five workflows → full 40-hex commit SHA with `# vX.Y.Z` comment;
   resolve SHAs from each tag via `gh api` at implementation time. For uv, an
   exact version string alone does not satisfy pin-by-hash: replace drift.yml's
@@ -178,13 +178,13 @@ Branch: `fix/review-workflows`. Verification: actionlint + `test_workflow_gates.
   SHA-pinned), or install from an artifact verified against a recorded hash.
   Pin the checkov container by digest. Add `.github/dependabot.yml`
   (`github-actions` ecosystem) so pins don't fossilize.
-- [ ] **B4: pin the properties in tests.** Extend `test_workflow_gates.py`:
+- [x] **B4: pin the properties in tests.** Extend `test_workflow_gates.py`:
   (1) every `uses:` matches `@[0-9a-f]{40}`; (2) the apply-only step is
   immediately preceded by the freshness re-verify step in every mutation job;
   (3) mutation jobs declare the shared concurrency group. Structure pins, same
   style as the existing gate tests — a live branch-advance race is not
   reachable from CI and is deliberately not attempted.
-- [ ] **B5: close out.** actionlint + full suite. PR through the gate. Note in
+- [x] **B5: close out.** actionlint + full suite. PR through the gate. Note in
   the PR body that the next real dispatch (issue #18's session) is the live
   proof of B1.
 

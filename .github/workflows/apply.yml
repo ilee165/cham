@@ -52,6 +52,13 @@ jobs:
       && inputs.stack == 'lab'
       && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # CR-08 (2026-08-13 review): one group shared by every job that touches
+    # the state backend, across plan/apply/destroy — a plan created mid-apply
+    # is the TOCTOU seam its freshness check cannot see. cancel-in-progress
+    # stays false so a queued run can never kill a half-finished apply.
+    concurrency:
+      group: terraform-mutations
+      cancel-in-progress: false
     environment: lab
     env:
       ENVIRONMENT_NAME: lab
@@ -107,7 +114,7 @@ jobs:
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::source_commit must be a full lowercase commit SHA."; exit 1; }
           [[ "$APPROVED_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::plan_sha256 must be a lowercase SHA-256."; exit 1; }
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ inputs.source_commit }}
           fetch-depth: 0
@@ -135,7 +142,7 @@ jobs:
           [[ "$(jq -r '.path' <<< "$run_json")" == ".github/workflows/plan.yml" ]] || { echo "::error::Run ID is not from terraform-plan."; exit 1; }
 
       - name: Download sanitized plan manifest
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: terraform-plan-${{ inputs.source_commit }}
           path: terraform/envs/lab
@@ -171,12 +178,12 @@ jobs:
           [[ "$manifest_blob" =~ ^lab/apply/${SOURCE_COMMIT}-${PLAN_RUN_ID}-[0-9]+/tfplan$ ]] || { echo "::error::Manifest plan_blob does not match the verified plan run identity."; exit 1; }
           echo "blob=$manifest_blob" >> "$GITHUB_OUTPUT"
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: "~1.9.0"
 
       - name: Azure login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -216,13 +223,35 @@ jobs:
           computed_sha256="$(sha256sum tfplan | awk '{print $1}')"
           [[ "$computed_sha256" == "$APPROVED_SHA256" ]] || { echo "::error::Saved-plan hash verification failed."; exit 1; }
 
-      - name: Apply exact reviewed plan
+      - name: Terraform init
         run: |
           set -euo pipefail
           terraform init -input=false -reconfigure \
             -backend-config="storage_account_name=${{ steps.backend.outputs.name }}" \
             -backend-config="subscription_id=${ARM_SUBSCRIPTION_ID}" \
             -backend-config="tenant_id=${ARM_TENANT_ID}"
+
+      # CR-08 (2026-08-13 review): the early freshness check above runs before
+      # the environment approval wait and the plan download, so main can move
+      # between it and the apply. Re-checking here, with nothing but the apply
+      # left in the job, shrinks that window to the gap between two adjacent
+      # steps. The early check stays for fast feedback; this one is the
+      # enforcement.
+      - name: Re-verify main has not moved
+        working-directory: .
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          [[ "$(git rev-parse origin/main)" == "$SOURCE_COMMIT" ]] || {
+            echo "::error::main moved after planning. Generate and approve a new saved plan."
+            exit 1
+          }
+
+      - name: Apply exact reviewed plan
+        run: |
+          set -euo pipefail
           terraform apply -input=false tfplan
 
   # Identical trust chain for the public-DNS stack. It writes into a zone that
@@ -236,6 +265,10 @@ jobs:
       && inputs.stack == 'cloudflare'
       && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # CR-08: same shared mutation group as the lab apply.
+    concurrency:
+      group: terraform-mutations
+      cancel-in-progress: false
     # A separate environment, not `lab`. Environment secrets are scoped to the
     # environment and never to a job, so parking the DNS:Edit token on `lab`
     # would put it inside the secret scope of the lab apply AND of destroy.yml
@@ -298,7 +331,7 @@ jobs:
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::source_commit must be a full lowercase commit SHA."; exit 1; }
           [[ "$APPROVED_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::plan_sha256 must be a lowercase SHA-256."; exit 1; }
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ inputs.source_commit }}
           fetch-depth: 0
@@ -326,7 +359,7 @@ jobs:
           [[ "$(jq -r '.path' <<< "$run_json")" == ".github/workflows/plan.yml" ]] || { echo "::error::Run ID is not from terraform-plan."; exit 1; }
 
       - name: Download sanitized plan manifest
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: cloudflare-plan-${{ inputs.source_commit }}
           path: terraform/cloudflare
@@ -359,12 +392,12 @@ jobs:
           [[ "$manifest_blob" =~ ^cloudflare/apply/${SOURCE_COMMIT}-${PLAN_RUN_ID}-[0-9]+/cloudflare\.tfplan$ ]] || { echo "::error::Manifest plan_blob does not match the verified plan run identity."; exit 1; }
           echo "blob=$manifest_blob" >> "$GITHUB_OUTPUT"
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: "~1.9.0"
 
       - name: Azure login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -400,6 +433,28 @@ jobs:
           computed_sha256="$(sha256sum cloudflare.tfplan | awk '{print $1}')"
           [[ "$computed_sha256" == "$APPROVED_SHA256" ]] || { echo "::error::Saved-plan hash verification failed."; exit 1; }
 
+      - name: Terraform init
+        run: |
+          set -euo pipefail
+          terraform init -input=false -reconfigure \
+            -backend-config="storage_account_name=${{ steps.backend.outputs.name }}" \
+            -backend-config="subscription_id=${ARM_SUBSCRIPTION_ID}" \
+            -backend-config="tenant_id=${ARM_TENANT_ID}"
+
+      # CR-08: same adjacency argument as the lab job — the re-check is the
+      # enforcement, the early check is the fast feedback.
+      - name: Re-verify main has not moved
+        working-directory: .
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          [[ "$(git rev-parse origin/main)" == "$SOURCE_COMMIT" ]] || {
+            echo "::error::main moved after planning. Generate and approve a new saved plan."
+            exit 1
+          }
+
       - name: Apply exact reviewed Cloudflare plan
         env:
           # Environment-scoped edit token (DOC-B06): reachable only from this
@@ -407,8 +462,4 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
-          terraform init -input=false -reconfigure \
-            -backend-config="storage_account_name=${{ steps.backend.outputs.name }}" \
-            -backend-config="subscription_id=${ARM_SUBSCRIPTION_ID}" \
-            -backend-config="tenant_id=${ARM_TENANT_ID}"
           terraform apply -input=false cloudflare.tfplan

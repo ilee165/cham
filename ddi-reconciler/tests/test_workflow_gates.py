@@ -268,3 +268,199 @@ def test_every_environment_gated_job_asserts_its_branch_policy():
             "branch a protection rule or ruleset covers', so a ruleset "
             "targeting release/* would silently widen who can deploy"
         )
+
+
+# --- CR-08 (2026-08-13 review): the freshness check must sit on the apply ---
+
+def _all_jobs():
+    for path in _workflow_files():
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for job_name, job in (data.get("jobs") or {}).items():
+            yield path.name, job_name, job
+
+
+def _is_freshness_recheck(step):
+    # `git fetch` is part of the property, not an implementation detail: a
+    # re-verify step that only compares `origin/main` reads the stale ref from
+    # checkout time, which by construction still equals source_commit — the
+    # check would pass forever and enforce nothing (PR #22 review, WR-01).
+    code = _step_code(step)
+    return ("git fetch" in code
+            and "rev-parse origin/main" in code
+            and "SOURCE_COMMIT" in code)
+
+
+def _terraform_apply_jobs():
+    """Every job that runs `terraform apply`, with its steps.
+
+    Derived, never enumerated, for the same reason as environment_gated_jobs:
+    a new applying job someone forgets to wire into these tests is exactly the
+    regression they exist to catch.
+    """
+    found = []
+    for workflow, job_name, job in _all_jobs():
+        steps = job.get("steps") or []
+        indices = [i for i, s in enumerate(steps)
+                   if re.search(r"\bterraform apply\b", _step_code(s))]
+        if indices:
+            found.append((workflow, job_name, steps, indices))
+    return found
+
+
+def test_the_derivation_actually_finds_the_applying_jobs():
+    jobs = _terraform_apply_jobs()
+    assert len(jobs) >= 3, f"expected the apply/destroy applying jobs, found {jobs}"
+    assert {"apply.yml", "destroy.yml"} <= {w for w, _j, _s, _i in jobs}
+
+
+def test_the_apply_step_applies_and_does_nothing_else():
+    # CR-08: `terraform init` reaches the network and the state backend; an
+    # apply step that still contains it widens the gap between the freshness
+    # re-check and the apply itself.
+    for workflow, job_name, steps, indices in _terraform_apply_jobs():
+        assert len(indices) == 1, (
+            f"{workflow}:{job_name} runs terraform apply in more than one step")
+        code = _step_code(steps[indices[0]])
+        assert "terraform init" not in code, (
+            f"{workflow}:{job_name} still initializes inside the apply step — "
+            "init belongs in its own step, before the freshness re-check"
+        )
+
+
+def test_freshness_is_re_verified_immediately_before_the_apply_step():
+    # CR-08: the early main-freshness check runs before the environment
+    # approval wait and the plan download, so main can move between it and the
+    # apply. Only adjacency makes the check an enforcement rather than advice.
+    for workflow, job_name, steps, indices in _terraform_apply_jobs():
+        i = indices[0]
+        assert i > 0 and _is_freshness_recheck(steps[i - 1]), (
+            f"{workflow}:{job_name}: the step immediately before the apply "
+            "step must re-fetch origin/main and compare it to source_commit — "
+            "a check separated from the apply by other steps reopens the "
+            "window it exists to close"
+        )
+
+
+# --- CR-08: every state-touching job serializes on one concurrency group ---
+
+MUTATION_CONCURRENCY_GROUP = "terraform-mutations"
+
+
+def _mutation_jobs():
+    """Every job that touches the real state backend.
+
+    Identified by `-backend-config` in a step: the saved-plan jobs, both
+    applies, and both destroy jobs configure the azurerm backend that way,
+    while `static` initializes with -backend=false and drift never runs
+    terraform at all.
+    """
+    return [(w, j_name, job) for w, j_name, job in _all_jobs()
+            if any("-backend-config" in _step_code(s)
+                   for s in job.get("steps") or [])]
+
+
+def test_the_derivation_actually_finds_the_mutation_jobs():
+    jobs = _mutation_jobs()
+    assert len(jobs) >= 6, f"expected the six backend-touching jobs, found {jobs}"
+    assert {"plan.yml", "apply.yml", "destroy.yml"} <= {w for w, _j, _job in jobs}
+
+
+def test_every_mutation_job_joins_the_shared_concurrency_group():
+    # CR-08: a plan created mid-apply is the TOCTOU seam — its freshness check
+    # passes against a main that the in-flight apply has not yet reconciled
+    # with reality. One shared group serializes every state-touching job;
+    # cancel-in-progress must be explicitly false so a queued run can never
+    # kill a half-finished apply.
+    for workflow, job_name, job in _mutation_jobs():
+        concurrency = job.get("concurrency")
+        assert isinstance(concurrency, dict), (
+            f"{workflow}:{job_name} touches the state backend without "
+            "declaring the shared concurrency group"
+        )
+        assert concurrency.get("group") == MUTATION_CONCURRENCY_GROUP, (
+            f"{workflow}:{job_name} uses concurrency group "
+            f"{concurrency.get('group')!r}; only one shared group serializes "
+            "plans against in-flight applies"
+        )
+        assert concurrency.get("cancel-in-progress") is False, (
+            f"{workflow}:{job_name} must pin cancel-in-progress: false — the "
+            "default cancels the in-progress run, i.e. a half-applied plan"
+        )
+
+
+def test_pr_checks_stay_out_of_the_mutation_group():
+    # The required PR checks must keep running in parallel: serializing them
+    # behind a queued apply would block every PR on an unrelated deployment.
+    for workflow, job_name in (("plan.yml", "static"), ("reconciler-tests.yml", "tests")):
+        job = _load(workflow)["jobs"][job_name]
+        assert "concurrency" not in job, (
+            f"{workflow}:{job_name} is a PR status check; putting it in a "
+            "concurrency group lets an in-flight apply block PR feedback"
+        )
+
+
+# --- WR-04: every executable input is pinned by hash ---
+
+# A moving tag like @v4 re-resolves on every run: whoever controls the tag
+# controls what executes inside jobs that hold cloud credentials. A 40-hex
+# commit SHA (or, for a container image, a sha256 digest) is the only ref
+# GitHub resolves immutably.
+_ACTION_SHA = re.compile(r"@[0-9a-f]{40}$")
+_IMAGE_DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
+
+
+def _all_steps():
+    for workflow, job_name, job in _all_jobs():
+        for step in job.get("steps") or []:
+            yield workflow, job_name, step
+
+
+def test_every_executable_input_is_pinned_by_hash():
+    uses = [(w, j, s["uses"]) for w, j, s in _all_steps() if s.get("uses")]
+    # Guards the guard: an empty scan would pass the loop below vacuously.
+    assert len(uses) >= 10, f"expected the workflows' `uses:` steps, found {uses}"
+    offenders = [
+        (w, j, u) for w, j, u in uses
+        if not (_IMAGE_DIGEST.search(u) if u.startswith("docker://")
+                else _ACTION_SHA.search(u))
+    ]
+    assert not offenders, (
+        "these steps execute whatever their moving ref points at on the day "
+        f"they run, inside credentialed jobs: {offenders}"
+    )
+
+
+def test_every_pin_names_the_version_it_tracks():
+    # Raw-text scan, not YAML: the version lives in a comment, and comments do
+    # not survive yaml.safe_load. A bare hash is unreviewable — nobody can say
+    # what a pin drifted FROM when dependabot proposes moving it. The comment
+    # must carry a version-shaped token (PR #22 review, IN-03): accepting any
+    # comment at all let a bumped SHA keep a stale `# pinned`-style label.
+    for path in _workflow_files():
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1):
+            if "uses:" in line.split("#")[0] and "@" in line:
+                comment = line.partition("#")[2]
+                assert re.search(r"\bv?\d+\.\d+(\.\d+)?\b", comment), (
+                    f"{path.name}:{lineno} pins a hash without a comment "
+                    "carrying the version it tracks (expected something "
+                    "shaped like v4.4.0 after the #)"
+                )
+
+
+def test_uv_is_installed_only_via_the_pinned_action_with_an_exact_version():
+    setup_uv = [(w, j, s) for w, j, s in _all_steps()
+                if "astral-sh/setup-uv" in (s.get("uses") or "")]
+    assert setup_uv, "no workflow installs uv via astral-sh/setup-uv"
+    for workflow, job_name, step in setup_uv:
+        version = str((step.get("with") or {}).get("version", ""))
+        assert re.fullmatch(r"\d+\.\d+\.\d+", version), (
+            f"{workflow}:{job_name} runs setup-uv without an exact `version:` "
+            "input — the action SHA pins the installer, not what it installs"
+        )
+    pip_installed = [(w, j) for w, j, s in _all_steps()
+                     if re.search(r"pip install\b[^\n]*\buv\b", _step_code(s))]
+    assert not pip_installed, (
+        "`pip install uv` resolves to whatever PyPI serves that night, with "
+        f"no hash on the executable it fetches: {pip_installed}"
+    )
