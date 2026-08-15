@@ -2,8 +2,8 @@
 
 **Source:** standards-axis review of `7c853aa...HEAD` (2026-08-15), findings 4
 and 5. Items 1–3 (Duplicated Code) were resolved by PR #32. This plan covers
-the two remaining judgement-call smells. **Plan only — nothing here is
-implemented yet.**
+the two remaining judgement-call smells. Executed 2026-08-15, landed as
+PR #33; the invariant-guard fix-up from PR #33's own review followed.
 
 **Nature of the work:** pure refactor. Neither finding is a defect; both are
 readability/shape debts wrapped around security-critical logic (CR-02

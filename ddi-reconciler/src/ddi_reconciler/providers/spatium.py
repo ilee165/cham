@@ -145,6 +145,15 @@ class _FieldLookup:
     value: int | None
     malformed: bool
 
+    def __post_init__(self) -> None:
+        # The three states are a construction-time invariant, not prose
+        # (PR #33 review): a malformed lookup that could carry a value would
+        # let a caller quietly certify with metadata the parser rejected.
+        if self.malformed and (self.key is not None or self.value is not None):
+            raise ValueError("a malformed lookup carries no key and no value")
+        if (self.key is None) != (self.value is None):
+            raise ValueError("found carries both key and value; absent carries neither")
+
 
 _ABSENT = _FieldLookup(key=None, value=None, malformed=False)
 _MALFORMED = _FieldLookup(key=None, value=None, malformed=True)
