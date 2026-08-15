@@ -217,7 +217,7 @@ Branch: `fix/review-watchdog`. Session tooling — not in any unattended path.
 
 ## Task E — resolution record
 
-- [ ] **E1:** Append a Resolution section to `docs/REVIEW.md` (repo convention,
+- [x] **E1:** Append a Resolution section to `docs/REVIEW.md` (repo convention,
   cf. the PR #7/#8 review): one row per finding — fixed-in-PR link. CR-06's row
   keeps the original BLOCKER classification and records the reassessment there:
   the pre-fix verify loop already failed loudly on budget exhaustion; the fix
