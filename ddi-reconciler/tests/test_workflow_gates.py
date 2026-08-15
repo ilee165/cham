@@ -333,3 +333,61 @@ def test_freshness_is_re_verified_immediately_before_the_apply_step():
             "a check separated from the apply by other steps reopens the "
             "window it exists to close"
         )
+
+
+# --- CR-08: every state-touching job serializes on one concurrency group ---
+
+MUTATION_CONCURRENCY_GROUP = "terraform-mutations"
+
+
+def _mutation_jobs():
+    """Every job that touches the real state backend.
+
+    Identified by `-backend-config` in a step: the saved-plan jobs, both
+    applies, and both destroy jobs configure the azurerm backend that way,
+    while `static` initializes with -backend=false and drift never runs
+    terraform at all.
+    """
+    return [(w, j_name, job) for w, j_name, job in _all_jobs()
+            if any("-backend-config" in _step_code(s)
+                   for s in job.get("steps") or [])]
+
+
+def test_the_derivation_actually_finds_the_mutation_jobs():
+    jobs = _mutation_jobs()
+    assert len(jobs) >= 6, f"expected the six backend-touching jobs, found {jobs}"
+    assert {"plan.yml", "apply.yml", "destroy.yml"} <= {w for w, _j, _job in jobs}
+
+
+def test_every_mutation_job_joins_the_shared_concurrency_group():
+    # CR-08: a plan created mid-apply is the TOCTOU seam — its freshness check
+    # passes against a main that the in-flight apply has not yet reconciled
+    # with reality. One shared group serializes every state-touching job;
+    # cancel-in-progress must be explicitly false so a queued run can never
+    # kill a half-finished apply.
+    for workflow, job_name, job in _mutation_jobs():
+        concurrency = job.get("concurrency")
+        assert isinstance(concurrency, dict), (
+            f"{workflow}:{job_name} touches the state backend without "
+            "declaring the shared concurrency group"
+        )
+        assert concurrency.get("group") == MUTATION_CONCURRENCY_GROUP, (
+            f"{workflow}:{job_name} uses concurrency group "
+            f"{concurrency.get('group')!r}; only one shared group serializes "
+            "plans against in-flight applies"
+        )
+        assert concurrency.get("cancel-in-progress") is False, (
+            f"{workflow}:{job_name} must pin cancel-in-progress: false — the "
+            "default cancels the in-progress run, i.e. a half-applied plan"
+        )
+
+
+def test_pr_checks_stay_out_of_the_mutation_group():
+    # The required PR checks must keep running in parallel: serializing them
+    # behind a queued apply would block every PR on an unrelated deployment.
+    for workflow, job_name in (("plan.yml", "static"), ("reconciler-tests.yml", "tests")):
+        job = _load(workflow)["jobs"][job_name]
+        assert "concurrency" not in job, (
+            f"{workflow}:{job_name} is a PR status check; putting it in a "
+            "concurrency group lets an in-flight apply block PR feedback"
+        )

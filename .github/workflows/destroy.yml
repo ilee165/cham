@@ -45,6 +45,14 @@ jobs:
   plan-destroy:
     if: inputs.operation == 'plan' && inputs.confirm == 'PLAN_DESTROY'
     runs-on: ubuntu-latest
+    # CR-08 (2026-08-13 review): saved-plan jobs join the shared mutation
+    # group too — a destroy plan created while an apply is in flight passes
+    # its freshness check against a main the apply has not yet reconciled
+    # with reality. cancel-in-progress stays false so a queued run can never
+    # kill a half-finished apply.
+    concurrency:
+      group: terraform-mutations
+      cancel-in-progress: false
     defaults:
       run:
         shell: bash
@@ -230,6 +238,10 @@ jobs:
       && inputs.confirm == 'DESTROY'
       && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # CR-08: same shared mutation group as every other state-touching job.
+    concurrency:
+      group: terraform-mutations
+      cancel-in-progress: false
     environment: lab
     env:
       ENVIRONMENT_NAME: lab

@@ -52,6 +52,13 @@ jobs:
       && inputs.stack == 'lab'
       && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # CR-08 (2026-08-13 review): one group shared by every job that touches
+    # the state backend, across plan/apply/destroy — a plan created mid-apply
+    # is the TOCTOU seam its freshness check cannot see. cancel-in-progress
+    # stays false so a queued run can never kill a half-finished apply.
+    concurrency:
+      group: terraform-mutations
+      cancel-in-progress: false
     environment: lab
     env:
       ENVIRONMENT_NAME: lab
@@ -258,6 +265,10 @@ jobs:
       && inputs.stack == 'cloudflare'
       && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # CR-08: same shared mutation group as the lab apply.
+    concurrency:
+      group: terraform-mutations
+      cancel-in-progress: false
     # A separate environment, not `lab`. Environment secrets are scoped to the
     # environment and never to a job, so parking the DNS:Edit token on `lab`
     # would put it inside the secret scope of the lab apply AND of destroy.yml
