@@ -238,16 +238,10 @@ jobs:
       # steps. The early check stays for fast feedback; this one is the
       # enforcement.
       - name: Re-verify main has not moved
-        working-directory: .
-        env:
-          SOURCE_COMMIT: ${{ inputs.source_commit }}
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin main
-          [[ "$(git rev-parse origin/main)" == "$SOURCE_COMMIT" ]] || {
-            echo "::error::main moved after planning. Generate and approve a new saved plan."
-            exit 1
-          }
+        uses: ./.github/actions/verify-main-unmoved
+        with:
+          source_commit: ${{ inputs.source_commit }}
+          failure_message: main moved after planning. Generate and approve a new saved plan.
 
       - name: Apply exact reviewed plan
         run: |
@@ -444,16 +438,10 @@ jobs:
       # CR-08: same adjacency argument as the lab job — the re-check is the
       # enforcement, the early check is the fast feedback.
       - name: Re-verify main has not moved
-        working-directory: .
-        env:
-          SOURCE_COMMIT: ${{ inputs.source_commit }}
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin main
-          [[ "$(git rev-parse origin/main)" == "$SOURCE_COMMIT" ]] || {
-            echo "::error::main moved after planning. Generate and approve a new saved plan."
-            exit 1
-          }
+        uses: ./.github/actions/verify-main-unmoved
+        with:
+          source_commit: ${{ inputs.source_commit }}
+          failure_message: main moved after planning. Generate and approve a new saved plan.
 
       - name: Apply exact reviewed Cloudflare plan
         env:

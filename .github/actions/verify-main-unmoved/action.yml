@@ -1,0 +1,35 @@
+name: verify-main-unmoved
+description: >-
+  The adjacent half of the CR-08 freshness gate: re-fetch origin/main and
+  require it to still equal the commit the saved plan was generated from,
+  immediately before an apply-only step. The early per-workflow check gives
+  fast feedback; this one is the enforcement. It lives in one composite so
+  the three mutation jobs (apply x2, destroy) cannot drift apart. `git fetch`
+  is part of the property, not an implementation detail: comparing the stale
+  checkout-time ref would pass forever and enforce nothing.
+
+inputs:
+  source_commit:
+    description: Commit SHA the saved plan was generated from.
+    required: true
+  failure_message:
+    description: >-
+      Full ::error text when main has moved; names the workflow-specific
+      re-plan procedure.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch and compare origin/main
+      shell: bash
+      env:
+        SOURCE_COMMIT: ${{ inputs.source_commit }}
+        FAILURE_MESSAGE: ${{ inputs.failure_message }}
+      run: |
+        set -euo pipefail
+        git fetch --no-tags origin main
+        [[ "$(git rev-parse origin/main)" == "$SOURCE_COMMIT" ]] || {
+          echo "::error::${FAILURE_MESSAGE}"
+          exit 1
+        }

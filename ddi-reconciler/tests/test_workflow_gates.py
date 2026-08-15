@@ -279,15 +279,66 @@ def _all_jobs():
             yield path.name, job_name, job
 
 
+FRESHNESS_ACTION = ".github/actions/verify-main-unmoved"
+
+
 def _is_freshness_recheck(step):
-    # `git fetch` is part of the property, not an implementation detail: a
-    # re-verify step that only compares `origin/main` reads the stale ref from
-    # checkout time, which by construction still equals source_commit — the
-    # check would pass forever and enforce nothing (PR #22 review, WR-01).
+    # The adjacent re-verify now lives in one composite action so the three
+    # mutation jobs cannot drift apart. A step qualifies by *using* it — and
+    # test_the_freshness_composite_actually_fetches below pins the composite's
+    # own contents, so gutting the composite cannot leave this predicate
+    # silently satisfied.
+    if str(step.get("uses", "")).startswith(f"./{FRESHNESS_ACTION}"):
+        return True
+    # Legacy inline form. `git fetch` is part of the property, not an
+    # implementation detail: a re-verify step that only compares
+    # `origin/main` reads the stale ref from checkout time, which by
+    # construction still equals source_commit — the check would pass forever
+    # and enforce nothing (PR #22 review, WR-01).
     code = _step_code(step)
     return ("git fetch" in code
             and "rev-parse origin/main" in code
             and "SOURCE_COMMIT" in code)
+
+
+def test_the_freshness_composite_actually_fetches():
+    # Guard the guard: _is_freshness_recheck accepts a `uses:` reference on
+    # sight, so the composite's own body must be pinned or emptying it would
+    # green every adjacency test while enforcing nothing.
+    action = WORKFLOWS_DIR.parent / "actions" / "verify-main-unmoved" / "action.yml"
+    assert action.is_file(), "the freshness composite action is missing"
+    # Assert on the executable run code, not the raw file: the action's own
+    # description PROSE mentions `git fetch`, so a whole-file substring scan
+    # stays green with the fetch deleted from the script (caught by mutation
+    # during this test's own review — a guard that cannot fail is worse than
+    # no guard).
+    data = yaml.safe_load(action.read_text(encoding="utf-8"))
+    run_code = "\n".join(
+        step.get("run", "") for step in data["runs"]["steps"]
+    )
+    assert "git fetch" in run_code
+    assert "rev-parse origin/main" in run_code
+    assert "exit 1" in run_code
+    assert "source_commit" in (data.get("inputs") or {})
+
+
+def test_reverify_steps_use_the_composite_not_inline_copies():
+    # The consolidation invariant: every step named like the adjacent
+    # re-verify delegates to the one composite. A fourth verbatim copy — or
+    # one of the three drifting back to an inline body — fails here.
+    found = 0
+    for workflow in _workflow_files():
+        data = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+        for job in (data.get("jobs") or {}).values():
+            for step in job.get("steps") or []:
+                if step.get("name") == "Re-verify main has not moved":
+                    found += 1
+                    assert str(step.get("uses", "")).startswith(f"./{FRESHNESS_ACTION}"), (
+                        f"{workflow.name}: inline re-verify body — use the "
+                        f"composite at {FRESHNESS_ACTION}"
+                    )
+                    assert "run" not in step
+    assert found == 3, f"expected the 3 mutation-job re-verify steps, found {found}"
 
 
 def _terraform_apply_jobs():
@@ -421,8 +472,13 @@ def test_every_executable_input_is_pinned_by_hash():
     assert len(uses) >= 10, f"expected the workflows' `uses:` steps, found {uses}"
     offenders = [
         (w, j, u) for w, j, u in uses
-        if not (_IMAGE_DIGEST.search(u) if u.startswith("docker://")
-                else _ACTION_SHA.search(u))
+        # A `./` reference is not a moving remote ref: it executes the file at
+        # the commit the job already checked out — for the mutation jobs, the
+        # operator-approved source_commit — via a SHA-pinned checkout action.
+        # There is nothing upstream to pin; the checkout IS the pin.
+        if not u.startswith("./")
+        and not (_IMAGE_DIGEST.search(u) if u.startswith("docker://")
+                 else _ACTION_SHA.search(u))
     ]
     assert not offenders, (
         "these steps execute whatever their moving ref points at on the day "
