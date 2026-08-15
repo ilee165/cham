@@ -391,3 +391,66 @@ def test_pr_checks_stay_out_of_the_mutation_group():
             f"{workflow}:{job_name} is a PR status check; putting it in a "
             "concurrency group lets an in-flight apply block PR feedback"
         )
+
+
+# --- WR-04: every executable input is pinned by hash ---
+
+# A moving tag like @v4 re-resolves on every run: whoever controls the tag
+# controls what executes inside jobs that hold cloud credentials. A 40-hex
+# commit SHA (or, for a container image, a sha256 digest) is the only ref
+# GitHub resolves immutably.
+_ACTION_SHA = re.compile(r"@[0-9a-f]{40}$")
+_IMAGE_DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
+
+
+def _all_steps():
+    for workflow, job_name, job in _all_jobs():
+        for step in job.get("steps") or []:
+            yield workflow, job_name, step
+
+
+def test_every_executable_input_is_pinned_by_hash():
+    uses = [(w, j, s["uses"]) for w, j, s in _all_steps() if s.get("uses")]
+    # Guards the guard: an empty scan would pass the loop below vacuously.
+    assert len(uses) >= 10, f"expected the workflows' `uses:` steps, found {uses}"
+    offenders = [
+        (w, j, u) for w, j, u in uses
+        if not (_IMAGE_DIGEST.search(u) if u.startswith("docker://")
+                else _ACTION_SHA.search(u))
+    ]
+    assert not offenders, (
+        "these steps execute whatever their moving ref points at on the day "
+        f"they run, inside credentialed jobs: {offenders}"
+    )
+
+
+def test_every_pin_names_the_version_it_tracks():
+    # Raw-text scan, not YAML: the version lives in a comment, and comments do
+    # not survive yaml.safe_load. A bare hash is unreviewable — nobody can say
+    # what a pin drifted FROM when dependabot proposes moving it.
+    for path in _workflow_files():
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1):
+            if "uses:" in line.split("#")[0] and "@" in line:
+                assert "#" in line, (
+                    f"{path.name}:{lineno} pins a hash without a comment "
+                    "naming the version it tracks"
+                )
+
+
+def test_uv_is_installed_only_via_the_pinned_action_with_an_exact_version():
+    setup_uv = [(w, j, s) for w, j, s in _all_steps()
+                if "astral-sh/setup-uv" in (s.get("uses") or "")]
+    assert setup_uv, "no workflow installs uv via astral-sh/setup-uv"
+    for workflow, job_name, step in setup_uv:
+        version = str((step.get("with") or {}).get("version", ""))
+        assert re.fullmatch(r"\d+\.\d+\.\d+", version), (
+            f"{workflow}:{job_name} runs setup-uv without an exact `version:` "
+            "input — the action SHA pins the installer, not what it installs"
+        )
+    pip_installed = [(w, j) for w, j, s in _all_steps()
+                     if re.search(r"pip install\b[^\n]*\buv\b", _step_code(s))]
+    assert not pip_installed, (
+        "`pip install uv` resolves to whatever PyPI serves that night, with "
+        f"no hash on the executable it fetches: {pip_installed}"
+    )
