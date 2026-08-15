@@ -8,6 +8,11 @@
 # from terraform/envs/lab (init downloads the provider schema only).
 mock_provider "azurerm" {}
 
+# Fixture preamble intentionally duplicated across the five *.tftest.hcl
+# files that need dummy keys/addresses (2026-08-15 standards review): tftest
+# has no include mechanism, and the one sharing vehicle — a committed tfvars
+# auto-loaded by `terraform test` — would need a carve-out in the .gitignore
+# rule keeping tfvars out of this public repo. Self-contained files win.
 variables {
   subscription_id = "00000000-0000-0000-0000-000000000000"
   home_ip         = "203.0.113.5/32"

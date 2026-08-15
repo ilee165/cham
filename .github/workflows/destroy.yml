@@ -408,16 +408,10 @@ jobs:
       # apply-only step shrinks that window to the gap between two adjacent
       # steps.
       - name: Re-verify main has not moved
-        working-directory: .
-        env:
-          SOURCE_COMMIT: ${{ inputs.source_commit }}
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin main
-          [[ "$(git rev-parse origin/main)" == "$SOURCE_COMMIT" ]] || {
-            echo "::error::main moved after destroy planning. Generate and approve a new destroy plan."
-            exit 1
-          }
+        uses: ./.github/actions/verify-main-unmoved
+        with:
+          source_commit: ${{ inputs.source_commit }}
+          failure_message: main moved after destroy planning. Generate and approve a new destroy plan.
 
       - name: Apply exact reviewed destroy plan
         run: |

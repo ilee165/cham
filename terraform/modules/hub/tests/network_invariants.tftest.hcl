@@ -10,6 +10,11 @@
 # terraform/modules/hub (init downloads the provider schema only).
 mock_provider "azurerm" {}
 
+# Fixture preamble intentionally duplicated across the five *.tftest.hcl
+# files that need dummy keys/addresses (2026-08-15 standards review): tftest
+# has no include mechanism, and the one sharing vehicle — a committed tfvars
+# auto-loaded by `terraform test` — would need a carve-out in the .gitignore
+# rule keeping tfvars out of this public repo. Self-contained files win.
 variables {
   location            = "eastus2"
   resource_group_name = "rg-test"
