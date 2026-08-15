@@ -162,6 +162,54 @@ class TestSubscriptionPinning:
         assert result.returncode != 0
 
 
+class TestReissueStateMachine:
+    """Structure pins for CR-06 (2026-08-13 review).
+
+    ``az vm deallocate --no-wait`` exits 0 when Azure ACCEPTS the long-running
+    operation, not when the VM reaches ``deallocated``. The pre-fix script
+    permanently removed a VM from its pending set on acceptance and a separate
+    later loop only polled — an accepted-then-failed or stalled operation left
+    the cost-bearing VM running until the verify budget threw.
+
+    The failure needs Azure to accept an operation and then stall it, which no
+    offline test can produce, and a faked-CLI behavioral test would take
+    minutes of wall clock (15-second poll cycles, a 3-minute stall window).
+    So, as with C1's resolver pin, these are structure pins that fail on the
+    pre-fix script: request and verification must be one per-VM state machine
+    with a reissue transition, not two sequential loops.
+    """
+
+    TEXT = WATCHDOG.read_text(encoding="utf-8")
+
+    def test_per_vm_phases_exist(self):
+        for phase in ("'pending-request'", "'pending-verify'", "'done'"):
+            assert phase in self.TEXT, f"missing state-machine phase {phase}"
+
+    def test_stalled_acceptance_is_reissued(self):
+        assert "deallocate_reissued" in self.TEXT
+        # The stall window that separates "operation in flight" from
+        # "accepted but going nowhere" must exist as an explicit bound.
+        assert "$stallReissueAfter" in self.TEXT
+
+    def test_acceptance_is_not_terminal(self):
+        # The pre-fix shape: acceptance removed the VM from a request-only
+        # pending set, after which nothing could ever reissue. That set's
+        # disappearance is the structural witness that request and verify
+        # are now one machine.
+        assert "$pendingDeallocations" not in self.TEXT
+
+    def test_budget_exhaustion_still_fails_loudly(self):
+        # CR-06's fix must not weaken the existing fail-closed property: the
+        # 30-minute budget keeps its loud terminal throw and its markers for
+        # both phases, and success still prints the verified marker.
+        assert "AddMinutes(30)" in self.TEXT
+        assert "deallocate_FAILED_budget_exhausted" in self.TEXT
+        assert "verify_FAILED_budget_exhausted" in self.TEXT
+        assert "watchdog_deallocation_UNVERIFIED=true" in self.TEXT
+        assert "watchdog_deallocation_verified=true" in self.TEXT
+        assert re.search(r"throw 'Watchdog retry budget exhausted", self.TEXT)
+
+
 def test_subscription_guid_shape_is_validated_in_the_script():
     # Structure pin, pwsh-independent: the parameter must carry a GUID
     # ValidatePattern, not merely non-emptiness — a subscription NAME would

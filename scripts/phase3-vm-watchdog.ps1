@@ -247,59 +247,93 @@ while ([System.DateTimeOffset]::UtcNow -lt $parsedDeadline) {
     Start-Sleep -Milliseconds ([int] $sleepMilliseconds)
 }
 
-# Round-robin: attempt every pending VM each cycle so one persistently
-# failing VM cannot starve deallocation requests for the others. Retries
-# stay aggressive but are bounded: 30 minutes past the deadline the
-# watchdog fails loudly and exits non-zero, so a wedged run is
-# distinguishable from a working one. The operation set stays
-# deallocate-only.
+# CR-06: `az vm deallocate --no-wait` exits 0 when Azure ACCEPTS the
+# long-running operation, not when the VM reaches `deallocated`. The original
+# design removed a VM from its request set on acceptance and left a separate
+# later loop that only polled — so an accepted operation that subsequently
+# failed or stalled left the cost-bearing VM running until the budget threw.
+# Request and verification are therefore one per-VM state machine:
+#
+#   pending-request --accepted--> pending-verify --'VM deallocated'--> done
+#          ^                            |
+#          +-- any state other than deallocating/deallocated persisting
+#              past the stall window (reissue) --------------------------+
+#
+# 'VM deallocating' waits without reissue (the operation is demonstrably in
+# progress); everything else — running, stopped, unknown — is treated as a
+# dead acceptance once the stall window passes. Reissuing is safe: the
+# operation set stays deallocate-only, and deallocate on an already
+# deallocating or deallocated VM is idempotent at the Azure API.
+#
+# Round-robin: every non-done VM is attempted each cycle so one persistently
+# failing VM cannot starve the others. Retries stay aggressive but bounded:
+# 30 minutes past the deadline the watchdog fails loudly and exits non-zero,
+# so a wedged run is distinguishable from a working one.
 $retryBudget = $parsedDeadline.AddMinutes(30)
-$pendingDeallocations = [System.Collections.Generic.HashSet[string]]::new(
-    [string[]] $expectedVmNames,
-    [System.StringComparer]::Ordinal
-)
-while ($pendingDeallocations.Count -gt 0) {
-    if ([System.DateTimeOffset]::UtcNow -gt $retryBudget) {
-        foreach ($vmName in $pendingDeallocations) {
-            Write-PowerState -VmName $vmName -PowerState 'deallocate_FAILED_budget_exhausted'
-        }
-        throw 'Watchdog retry budget exhausted; manual deallocation required.'
-    }
-    foreach ($vmName in @($pendingDeallocations)) {
-        $deallocateArguments = Get-DeallocateArguments -VmName $vmName
-        $deallocateOutput = @(& $azureCli @deallocateArguments 2>&1)
-        if ($LASTEXITCODE -eq 0) {
-            # State first, telemetry second: a logging hiccup right after a
-            # successful deallocate must not leave the VM marked pending.
-            $null = $pendingDeallocations.Remove($vmName)
-            Write-PowerState -VmName $vmName -PowerState 'deallocate_accepted'
-        }
-        else {
-            Write-PowerState -VmName $vmName -PowerState (
-                'deallocate_retry_pending reason={0}' -f (
-                    Get-FirstStderrLine -NativeOutput $deallocateOutput
-                )
-            )
-        }
-    }
-    if ($pendingDeallocations.Count -gt 0) {
-        Start-Sleep -Milliseconds 15000
+# ~12 poll cycles at 15 s — long enough that a healthy deallocation has
+# always reported PowerState/deallocating, short enough to leave several
+# reissue rounds inside the 30-minute budget.
+$stallReissueAfter = [System.TimeSpan]::FromMinutes(3)
+
+$vmStates = @{}
+foreach ($vmName in $expectedVmNames) {
+    $vmStates[$vmName] = [pscustomobject]@{
+        Phase         = 'pending-request'
+        AcceptedAtUtc = [System.DateTimeOffset]::MinValue
     }
 }
 
-$pendingVmNames = [System.Collections.Generic.HashSet[string]]::new(
-    [string[]] $expectedVmNames,
-    [System.StringComparer]::Ordinal
-)
-while ($pendingVmNames.Count -gt 0) {
-    if ([System.DateTimeOffset]::UtcNow -gt $retryBudget) {
-        foreach ($vmName in $pendingVmNames) {
-            Write-PowerState -VmName $vmName -PowerState 'verify_FAILED_budget_exhausted'
-        }
-        Write-Output 'watchdog_deallocation_UNVERIFIED=true'
-        throw 'Watchdog verification budget exhausted; manual verification required.'
+while ($true) {
+    $pendingVmNames = @(
+        $expectedVmNames | Where-Object { $vmStates[$_].Phase -ne 'done' }
+    )
+    if ($pendingVmNames.Count -eq 0) {
+        break
     }
-    foreach ($vmName in @($pendingVmNames)) {
+
+    if ([System.DateTimeOffset]::UtcNow -gt $retryBudget) {
+        $anyUnverified = $false
+        foreach ($vmName in $pendingVmNames) {
+            if ($vmStates[$vmName].Phase -eq 'pending-request') {
+                Write-PowerState -VmName $vmName -PowerState 'deallocate_FAILED_budget_exhausted'
+            }
+            else {
+                $anyUnverified = $true
+                Write-PowerState -VmName $vmName -PowerState 'verify_FAILED_budget_exhausted'
+            }
+        }
+        if ($anyUnverified) {
+            Write-Output 'watchdog_deallocation_UNVERIFIED=true'
+        }
+        throw 'Watchdog retry budget exhausted; manual deallocation and verification required.'
+    }
+
+    foreach ($vmName in $pendingVmNames) {
+        $state = $vmStates[$vmName]
+
+        if ($state.Phase -eq 'pending-request') {
+            $deallocateArguments = Get-DeallocateArguments -VmName $vmName
+            $deallocateOutput = @(& $azureCli @deallocateArguments 2>&1)
+            if ($LASTEXITCODE -eq 0) {
+                # State first, telemetry second: a logging hiccup right after
+                # a successful request must not leave the phase stale.
+                # Acceptance is NOT completion — only an instance view showing
+                # 'VM deallocated' retires the VM from this machine.
+                $state.Phase = 'pending-verify'
+                $state.AcceptedAtUtc = [System.DateTimeOffset]::UtcNow
+                Write-PowerState -VmName $vmName -PowerState 'deallocate_accepted'
+            }
+            else {
+                Write-PowerState -VmName $vmName -PowerState (
+                    'deallocate_retry_pending reason={0}' -f (
+                        Get-FirstStderrLine -NativeOutput $deallocateOutput
+                    )
+                )
+            }
+            continue
+        }
+
+        # Phase: pending-verify.
         $statusArguments = Get-InstanceViewArguments -VmName $vmName
         $statusOutput = @(& $azureCli @statusArguments 2>&1)
         $statusJson = @(
@@ -336,11 +370,26 @@ while ($pendingVmNames.Count -gt 0) {
 
         Write-PowerState -VmName $vmName -PowerState $powerState
         if ($powerState -ceq 'VM deallocated') {
-            $null = $pendingVmNames.Remove($vmName)
+            $state.Phase = 'done'
+        }
+        elseif (
+            $powerState -cne 'VM deallocating' -and
+            ([System.DateTimeOffset]::UtcNow - $state.AcceptedAtUtc) -gt $stallReissueAfter
+        ) {
+            # The acceptance went stale: the VM is not deallocated and not
+            # observably deallocating well past the stall window. Fall back
+            # to pending-request so next cycle reissues the deallocate.
+            $state.Phase = 'pending-request'
+            Write-PowerState -VmName $vmName -PowerState (
+                'deallocate_reissued last_power_state={0}' -f $powerState
+            )
         }
     }
 
-    if ($pendingVmNames.Count -gt 0) {
+    $stillPending = @(
+        $expectedVmNames | Where-Object { $vmStates[$_].Phase -ne 'done' }
+    )
+    if ($stillPending.Count -gt 0) {
         Start-Sleep -Milliseconds 15000
     }
 }
