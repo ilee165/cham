@@ -14,6 +14,15 @@ param(
     [ValidateNotNullOrEmpty()]
     [string] $ResourceGroup,
 
+    # CR-05: resource-group and VM names are not globally unique, so every az
+    # call must be pinned to the lab subscription rather than riding whatever
+    # default context the CLI happens to hold. A GUID (not a subscription
+    # name) is required: names resolve through the same ambient profile this
+    # parameter exists to bypass.
+    [Parameter(Mandatory)]
+    [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    [string] $SubscriptionId,
+
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [string] $VmNames,
@@ -92,7 +101,10 @@ function Write-PowerState {
     )
 
     $timestamp = [System.DateTimeOffset]::UtcNow.ToString('o')
-    $line = '{0} vm={1} power_state={2}' -f $timestamp, $VmName, $PowerState
+    # CR-05: the subscription is part of the audit trail — a log line that
+    # cannot say WHERE a deallocation landed cannot prove it landed in the lab.
+    $line = '{0} vm={1} subscription={2} power_state={3}' -f
+        $timestamp, $VmName, $SubscriptionId, $PowerState
     # Logging is best-effort telemetry: a transient log-write failure
     # (antivirus hold, concurrent writer, disk full) must never abort the
     # essential deallocation work.
@@ -119,14 +131,73 @@ function Get-FirstStderrLine {
     ([string] $firstLine -replace '\s+', ' ').Trim()
 }
 
+# CR-05: every az invocation the watchdog can ever issue is built by exactly
+# one of these three functions, each pinning `--subscription`. -DryRun prints
+# what they return and the live path splats what they return, so the printed
+# argument vectors ARE the executed ones — not a parallel copy that can drift.
+function Get-AuthProbeArguments {
+    @(
+        'account', 'get-access-token',
+        '--subscription', $SubscriptionId,
+        '--output', 'none',
+        '--only-show-errors'
+    )
+}
+
+function Get-DeallocateArguments {
+    param(
+        [Parameter(Mandatory)]
+        [string] $VmName
+    )
+
+    @(
+        'vm', 'deallocate',
+        '--resource-group', $expectedResourceGroup,
+        '--name', $VmName,
+        '--subscription', $SubscriptionId,
+        '--no-wait',
+        '--only-show-errors'
+    )
+}
+
+function Get-InstanceViewArguments {
+    param(
+        [Parameter(Mandatory)]
+        [string] $VmName
+    )
+
+    @(
+        'vm', 'get-instance-view',
+        '--resource-group', $expectedResourceGroup,
+        '--name', $VmName,
+        '--subscription', $SubscriptionId,
+        '--query', 'instanceView.statuses',
+        '--output', 'json',
+        '--only-show-errors'
+    )
+}
+
 # -DryRun is a fast argument/allowlist validation: it short-circuits here,
 # before CLI resolution, the auth probe, and the deadline wait, so it needs
 # no Azure CLI installed, makes no Azure call, and returns immediately.
-# Output contract (relied on by verification): one DryRunNoMutation log
-# line per approved VM, then the two ok markers on stdout.
+# Output contract (relied on by verification and by
+# ddi-reconciler/tests/test_watchdog_args.py): one DryRunNoMutation log line
+# per approved VM, one `watchdog_planned_az_argv:` stdout line per az
+# invocation the live path would issue, then the two ok markers on stdout.
 if ($DryRun) {
     foreach ($vmName in $expectedVmNames) {
         Write-PowerState -VmName $vmName -PowerState 'DryRunNoMutation'
+    }
+    Write-Output ('watchdog_planned_az_argv: az {0}' -f (
+        (Get-AuthProbeArguments) -join ' '
+    ))
+    foreach ($vmName in $expectedVmNames) {
+        Write-Output ('watchdog_planned_az_argv: az {0}' -f (
+            (Get-DeallocateArguments -VmName $vmName) -join ' '
+        ))
+        Write-Output ('watchdog_planned_az_argv: az {0}' -f (
+            (Get-InstanceViewArguments -VmName $vmName) -join ' '
+        ))
     }
     Write-Output 'watchdog_dry_run_ok=true'
     Write-Output 'watchdog_vm_allowlist_ok=true'
@@ -149,10 +220,14 @@ else {
 # loudly at arm, not degrade into silent unknown-state polling at deadline.
 # `account show` only reads the cached local profile and cannot detect an
 # expired or revoked token; `account get-access-token` forces a real token
-# acquisition against Azure AD while remaining read-only.
+# acquisition against Azure AD while remaining read-only. Because the probe
+# carries `--subscription` (CR-05), it also proves at arm time that the pinned
+# subscription is reachable from this login — an unreachable or mistyped
+# subscription fails here, not silently at deadline.
 # Skipped in -DryRun, which must make no Azure call.
 if (-not $DryRun) {
-    $probeOutput = @(& $azureCli account get-access-token --output none --only-show-errors 2>&1)
+    $probeArguments = Get-AuthProbeArguments
+    $probeOutput = @(& $azureCli @probeArguments 2>&1)
     if ($LASTEXITCODE -ne 0) {
         throw (
             'Azure CLI authentication probe failed at arm time: {0}' -f (
@@ -191,13 +266,7 @@ while ($pendingDeallocations.Count -gt 0) {
         throw 'Watchdog retry budget exhausted; manual deallocation required.'
     }
     foreach ($vmName in @($pendingDeallocations)) {
-        $deallocateArguments = @(
-            'vm', 'deallocate',
-            '--resource-group', $expectedResourceGroup,
-            '--name', $vmName,
-            '--no-wait',
-            '--only-show-errors'
-        )
+        $deallocateArguments = Get-DeallocateArguments -VmName $vmName
         $deallocateOutput = @(& $azureCli @deallocateArguments 2>&1)
         if ($LASTEXITCODE -eq 0) {
             # State first, telemetry second: a logging hiccup right after a
@@ -231,14 +300,7 @@ while ($pendingVmNames.Count -gt 0) {
         throw 'Watchdog verification budget exhausted; manual verification required.'
     }
     foreach ($vmName in @($pendingVmNames)) {
-        $statusArguments = @(
-            'vm', 'get-instance-view',
-            '--resource-group', $expectedResourceGroup,
-            '--name', $vmName,
-            '--query', 'instanceView.statuses',
-            '--output', 'json',
-            '--only-show-errors'
-        )
+        $statusArguments = Get-InstanceViewArguments -VmName $vmName
         $statusOutput = @(& $azureCli @statusArguments 2>&1)
         $statusJson = @(
             $statusOutput |

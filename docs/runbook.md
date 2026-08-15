@@ -147,8 +147,9 @@ implicitly on retry.
 Minimum VM sequence (unconditional):
 
 1. Arm the deallocation-only watchdog (`scripts/phase3-vm-watchdog.ps1`)
-   with an absolute UTC deadline of at most 60 minutes and prove it is
-   running before any start.
+   with an absolute UTC deadline of at most 60 minutes and the lab
+   subscription GUID (`-SubscriptionId`; mandatory — every az call it issues
+   is pinned to it), and prove it is running before any start.
 2. Start `vm-hub-ddi` only; wait for `VM running`, SSH, and cloud-init.
 3. Run every hub tunnel/DNS gate; only then start `vm-test-app`.
 4. Never start `vm-test-mgmt`.
