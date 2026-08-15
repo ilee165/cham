@@ -64,6 +64,7 @@ make and this adapter's to preserve.
 """
 from __future__ import annotations
 
+import dataclasses
 import ipaddress
 import json
 import re
@@ -122,38 +123,45 @@ def _parse_count(value) -> int | None:
     return None
 
 
-def _first_int_field(body: dict, keys: tuple[str, ...]) -> tuple[tuple[str, int] | None, bool]:
-    """((key, value) or None, malformed) for the recognized keys of `body`.
+@dataclasses.dataclass(frozen=True, slots=True)
+class _FieldLookup:
+    """Tri-state pagination-metadata lookup (CR-02): found, absent, malformed.
 
-    Tri-state on purpose (CR-02): *found*, *absent*, or *malformed* — and
-    malformed poisons the lot. If ANY recognized key is present with a value
-    that is not a canonical non-negative integer, the whole lookup reports
-    (None, True): a later alias in the same body must not restore what a
+    *Malformed poisons the lot*: if ANY recognized key is present with a value
+    that is not a canonical non-negative integer, the whole lookup is
+    malformed — a later alias in the same body must not restore what a
     malformed earlier one forfeited ({"total": 1.9, "count": 1} must not
     certify via "count"), and metadata too damaged to verify with is also too
-    damaged to navigate with.
+    damaged to navigate with. A malformed or absent lookup therefore carries
+    no key and no value.
 
     The key travels with the value because a page-size echoed back into the
     next request has to use the name this deployment answers to (`page_size`
     here, `size` or `limit` elsewhere) — guessing it renames the parameter and
     the server silently serves its default instead.
     """
-    found: tuple[str, int] | None = None
+
+    key: str | None
+    value: int | None
+    malformed: bool
+
+
+_ABSENT = _FieldLookup(key=None, value=None, malformed=False)
+_MALFORMED = _FieldLookup(key=None, value=None, malformed=True)
+
+
+def _first_int_field(body: dict, keys: tuple[str, ...]) -> _FieldLookup:
+    """The first recognized key of `body` as a _FieldLookup — see the type."""
+    found: _FieldLookup | None = None
     for key in keys:
         if key not in body:
             continue
         parsed = _parse_count(body[key])
         if parsed is None:
-            return None, True
+            return _MALFORMED
         if found is None:
-            found = (key, parsed)
-    return found, False
-
-
-def _first_int(body: dict, keys: tuple[str, ...]) -> tuple[int | None, bool]:
-    """(first recognized value or None, malformed) — see _first_int_field."""
-    found, malformed = _first_int_field(body, keys)
-    return (None if found is None else found[1]), malformed
+            found = _FieldLookup(key=key, value=parsed, malformed=False)
+    return _ABSENT if found is None else found
 
 
 def _with_query(url: str, params: dict[str, int]) -> str:
@@ -284,19 +292,21 @@ class SpatiumProvider:
         `page_size` under a page-count branch that never consults it — must
         taint the fetch even though navigation never needed the value.
         """
-        pages, bad_pages = _first_int(body, PAGE_COUNT_KEYS)
-        current_page, bad_page = _first_int_field(body, PAGE_KEYS)
-        size, bad_size = _first_int_field(body, LIMIT_KEYS)
-        offset, bad_offset = _first_int(body, OFFSET_KEYS)
-        malformed = bad_pages or bad_page or bad_size or bad_offset
+        pages = _first_int_field(body, PAGE_COUNT_KEYS)
+        current_page = _first_int_field(body, PAGE_KEYS)
+        size = _first_int_field(body, LIMIT_KEYS)
+        offset = _first_int_field(body, OFFSET_KEYS)
+        malformed = any(
+            lookup.malformed for lookup in (pages, current_page, size, offset))
         has_link, link = self._explicit_next(body, current_url, path)
         if has_link:
             return link, malformed
         # Page-numbered envelope that declares how many pages there are
         # (fastapi-pagination Page: page/pages/size).
-        if pages is not None:
-            current = page_number if current_page is None else current_page[1]
-            next_url = (None if current >= pages
+        if pages.value is not None:
+            current = (page_number if current_page.value is None
+                       else current_page.value)
+            next_url = (None if current >= pages.value
                         else _with_query(current_url, {"page": current + 1}))
             return next_url, malformed
         # Page-numbered envelope that declares only a total — SpatiumDDI's
@@ -304,17 +314,18 @@ class SpatiumProvider:
         # link, so the total is the only thing that says another page exists.
         # An empty page ends the walk even with the total unmet; the short-read
         # check below is what turns that into an error.
-        if current_page is not None and total is not None and consumed < total and page_len:
-            params = {"page": current_page[1] + 1}
-            if size is not None:
-                params[size[0]] = size[1]
+        if current_page.value is not None and total is not None and consumed < total and page_len:
+            params = {"page": current_page.value + 1}
+            if size.value is not None:
+                params[size.key] = size.value
             return _with_query(current_url, params), malformed
         # Offset/limit envelope (fastapi-pagination LimitOffsetPage), inferred
         # from the declared total: there is more to read and no link to it.
         if total is not None and consumed < total and page_len:
             return _with_query(current_url, {
-                "offset": (consumed - page_len if offset is None else offset) + page_len,
-                "limit": page_len if size is None else size[1]}), malformed
+                "offset": (consumed - page_len if offset.value is None
+                           else offset.value) + page_len,
+                "limit": page_len if size.value is None else size.value}), malformed
         return None, malformed
 
     def _read(self, path: str) -> list:
@@ -393,8 +404,9 @@ class SpatiumProvider:
                         "delete order downstream. Refusing the read.")
                 seen_items.add(fingerprint)
             items.extend(page_items)
-            total, bad = _first_int(body, TOTAL_KEYS)
-            metadata_ok = metadata_ok and not bad
+            total_lookup = _first_int_field(body, TOTAL_KEYS)
+            total = total_lookup.value
+            metadata_ok = metadata_ok and not total_lookup.malformed
             if total is not None:
                 if declared_total is None:
                     declared_total = total
