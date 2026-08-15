@@ -201,16 +201,17 @@ def _check_type_conflicts(edge: EdgeConfig, desired: list[CanonicalRecord],
     observed_by_owner: dict[tuple[str, str], set[str]] = {}
     for zone, name, rtype in observed_keys:
         observed_by_owner.setdefault((zone, name), set()).add(rtype)
-    edge_conflicts = sorted(
-        f"{record.zone}/{record.name}: desired {record.rtype} vs edge "
-        f"{' and '.join(sorted(others))}"
-        for record in desired
-        for observed in [observed_by_owner.get((record.zone, record.name), set())]
-        if record.rtype not in observed
-        for others in [
-            {rtype for rtype in observed if "CNAME" in (rtype, record.rtype)}
-        ]
-        if others)
+    edge_conflicts = []
+    for record in desired:
+        observed = observed_by_owner.get((record.zone, record.name), set())
+        if record.rtype in observed:
+            continue
+        others = {rtype for rtype in observed if "CNAME" in (rtype, record.rtype)}
+        if others:
+            edge_conflicts.append(
+                f"{record.zone}/{record.name}: desired {record.rtype} vs edge "
+                f"{' and '.join(sorted(others))}")
+    edge_conflicts.sort()
 
     conflicts = truth_conflicts + edge_conflicts
     if conflicts:
