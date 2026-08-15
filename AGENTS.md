@@ -60,3 +60,18 @@ Rules:
 - Read `graphify-out/GRAPH_REPORT.md` only for high-level architecture review (god nodes, surprising connections) or when query/path/explain do not surface enough context.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost). Prefer this over a full rebuild unless docs/PDFs/images also changed.
 - Do not fall back to broad Grep/Glob of the whole repo until the graph tools have been tried (or the graph is missing/stale).
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `ilee165/cham`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage labels, used verbatim (`needs-triage`, `needs-info`,
+`ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context; ADRs live in `docs/decisions.md`, not `docs/adr/`. See `docs/agents/domain.md`.
