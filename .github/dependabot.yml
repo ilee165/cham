@@ -3,6 +3,14 @@
 # weekly PR stream that moves each pin deliberately, with the version comment
 # updated alongside the hash. Dependabot preserves the SHA-pin style when the
 # existing ref is a SHA with a version comment.
+#
+# Two pins sit OUTSIDE this file's reach and move only by manual PR (PR #22
+# review, WR-02): the checkov container digest in plan.yml (the
+# github-actions ecosystem does not bump `docker://…@sha256` image
+# references) and the uv `version:` input in drift.yml and
+# reconciler-tests.yml (an action input, not a dependency ref). Same
+# deliberate-bump policy as WR-05's VM image pins; revisit both whenever a
+# dependabot PR touches the neighbouring pins.
 version: 2
 updates:
   - package-ecosystem: github-actions
