@@ -21,7 +21,7 @@ Ubuntu CI runners ship pwsh, so CI always runs the behavioral half.
 import re
 import shutil
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -51,7 +51,7 @@ needs_pwsh = pytest.mark.skipif(
 
 def _future_deadline():
     # Must be in the future and within the watchdog's 60-minute window.
-    return (datetime.now(timezone.utc) + timedelta(minutes=5)).strftime(
+    return (datetime.now(UTC) + timedelta(minutes=5)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
 
@@ -75,12 +75,14 @@ def _run_watchdog(log_path, *, subscription=DUMMY_SUBSCRIPTION, omit_subscriptio
     ]
     if not omit_subscription:
         argv += ["-SubscriptionId", subscription]
+    # check=False: several tests assert on NONZERO exits (refusal paths).
     return subprocess.run(
         argv,
         capture_output=True,
         text=True,
         timeout=120,
         stdin=subprocess.DEVNULL,
+        check=False,
     )
 
 
