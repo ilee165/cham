@@ -211,6 +211,24 @@ class TestReissueStateMachine:
         assert "watchdog_deallocation_verified=true" in self.TEXT
         assert re.search(r"throw 'Watchdog retry budget exhausted", self.TEXT)
 
+    def test_exhaustion_classification_keeps_acceptance_history(self):
+        # WD-02 (PR #28 review): a VM that was accepted, stalled, and
+        # reissued back to pending-request would otherwise be classified at
+        # budget exhaustion by its CURRENT phase alone — reported as
+        # deallocate_FAILED_budget_exhausted, with the UNVERIFIED stdout
+        # marker skippable entirely — erasing from the audit trail that
+        # Azure accepted a deallocate whose outcome was never verified.
+        # Acceptance must latch, and the exhaustion classification must
+        # consult that latch, not just the phase.
+        assert "EverAccepted = $true" in self.TEXT
+        exhaustion = self.TEXT[
+            self.TEXT.index("$anyUnverified"):
+            self.TEXT.index("throw 'Watchdog retry budget exhausted")
+        ]
+        assert "EverAccepted" in exhaustion, (
+            "budget-exhaustion classification ignores acceptance history"
+        )
+
 
 def test_runbook_arming_snippet_matches_the_tested_invocation_shape():
     # WD-01 (PR #28 review): the watchdog is launched hidden via Start-Process

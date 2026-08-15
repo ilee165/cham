@@ -280,6 +280,12 @@ foreach ($vmName in $expectedVmNames) {
     $vmStates[$vmName] = [pscustomobject]@{
         Phase         = 'pending-request'
         AcceptedAtUtc = [System.DateTimeOffset]::MinValue
+        # WD-02: acceptance LATCHES. A VM reissued back to pending-request
+        # after a stalled acceptance is not the same, at budget exhaustion,
+        # as one whose deallocate Azure never accepted: the former may have
+        # a deallocation in flight whose outcome was never verified, and the
+        # audit trail must say so.
+        EverAccepted  = $false
     }
 }
 
@@ -294,7 +300,13 @@ while ($true) {
     if ([System.DateTimeOffset]::UtcNow -gt $retryBudget) {
         $anyUnverified = $false
         foreach ($vmName in $pendingVmNames) {
-            if ($vmStates[$vmName].Phase -eq 'pending-request') {
+            # Classify by acceptance history, not by current phase alone: a
+            # VM reissued back to pending-request after a stalled acceptance
+            # still has an unverified deallocation on the record.
+            if (
+                $vmStates[$vmName].Phase -eq 'pending-request' -and
+                -not $vmStates[$vmName].EverAccepted
+            ) {
                 Write-PowerState -VmName $vmName -PowerState 'deallocate_FAILED_budget_exhausted'
             }
             else {
@@ -321,6 +333,7 @@ while ($true) {
                 # 'VM deallocated' retires the VM from this machine.
                 $state.Phase = 'pending-verify'
                 $state.AcceptedAtUtc = [System.DateTimeOffset]::UtcNow
+                $state.EverAccepted = $true
                 Write-PowerState -VmName $vmName -PowerState 'deallocate_accepted'
             }
             else {
