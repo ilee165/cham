@@ -382,13 +382,34 @@ jobs:
           computed_sha256="$(sha256sum destroy.tfplan | awk '{print $1}')"
           [[ "$computed_sha256" == "$APPROVED_SHA256" ]] || { echo "::error::Saved destroy-plan hash verification failed."; exit 1; }
 
-      - name: Apply exact reviewed destroy plan
+      - name: Terraform init
         run: |
           set -euo pipefail
           terraform init -input=false -reconfigure \
             -backend-config="storage_account_name=${{ steps.backend.outputs.name }}" \
             -backend-config="subscription_id=${ARM_SUBSCRIPTION_ID}" \
             -backend-config="tenant_id=${ARM_TENANT_ID}"
+
+      # CR-08 (2026-08-13 review): the early freshness check runs before the
+      # environment approval wait and the plan download, so main can move
+      # between it and the destroy. Re-checking immediately before the
+      # apply-only step shrinks that window to the gap between two adjacent
+      # steps.
+      - name: Re-verify main has not moved
+        working-directory: .
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          [[ "$(git rev-parse origin/main)" == "$SOURCE_COMMIT" ]] || {
+            echo "::error::main moved after destroy planning. Generate and approve a new destroy plan."
+            exit 1
+          }
+
+      - name: Apply exact reviewed destroy plan
+        run: |
+          set -euo pipefail
           terraform apply -input=false destroy.tfplan
 
       - name: Verify lab resource group is empty

@@ -268,3 +268,68 @@ def test_every_environment_gated_job_asserts_its_branch_policy():
             "branch a protection rule or ruleset covers', so a ruleset "
             "targeting release/* would silently widen who can deploy"
         )
+
+
+# --- CR-08 (2026-08-13 review): the freshness check must sit on the apply ---
+
+def _all_jobs():
+    for path in _workflow_files():
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for job_name, job in (data.get("jobs") or {}).items():
+            yield path.name, job_name, job
+
+
+def _is_freshness_recheck(step):
+    code = _step_code(step)
+    return "rev-parse origin/main" in code and "SOURCE_COMMIT" in code
+
+
+def _terraform_apply_jobs():
+    """Every job that runs `terraform apply`, with its steps.
+
+    Derived, never enumerated, for the same reason as environment_gated_jobs:
+    a new applying job someone forgets to wire into these tests is exactly the
+    regression they exist to catch.
+    """
+    found = []
+    for workflow, job_name, job in _all_jobs():
+        steps = job.get("steps") or []
+        indices = [i for i, s in enumerate(steps)
+                   if re.search(r"\bterraform apply\b", _step_code(s))]
+        if indices:
+            found.append((workflow, job_name, steps, indices))
+    return found
+
+
+def test_the_derivation_actually_finds_the_applying_jobs():
+    jobs = _terraform_apply_jobs()
+    assert len(jobs) >= 3, f"expected the apply/destroy applying jobs, found {jobs}"
+    assert {"apply.yml", "destroy.yml"} <= {w for w, _j, _s, _i in jobs}
+
+
+def test_the_apply_step_applies_and_does_nothing_else():
+    # CR-08: `terraform init` reaches the network and the state backend; an
+    # apply step that still contains it widens the gap between the freshness
+    # re-check and the apply itself.
+    for workflow, job_name, steps, indices in _terraform_apply_jobs():
+        assert len(indices) == 1, (
+            f"{workflow}:{job_name} runs terraform apply in more than one step")
+        code = _step_code(steps[indices[0]])
+        assert "terraform init" not in code, (
+            f"{workflow}:{job_name} still initializes inside the apply step — "
+            "init belongs in its own step, before the freshness re-check"
+        )
+
+
+def test_freshness_is_re_verified_immediately_before_the_apply_step():
+    # CR-08: the early main-freshness check runs before the environment
+    # approval wait and the plan download, so main can move between it and the
+    # apply. Only adjacency makes the check an enforcement rather than advice.
+    for workflow, job_name, steps, indices in _terraform_apply_jobs():
+        i = indices[0]
+        assert i > 0 and _is_freshness_recheck(steps[i - 1]), (
+            f"{workflow}:{job_name}: the step immediately before the apply "
+            "step must re-fetch origin/main and compare it to source_commit — "
+            "a check separated from the apply by other steps reopens the "
+            "window it exists to close"
+        )

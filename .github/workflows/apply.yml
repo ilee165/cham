@@ -216,13 +216,35 @@ jobs:
           computed_sha256="$(sha256sum tfplan | awk '{print $1}')"
           [[ "$computed_sha256" == "$APPROVED_SHA256" ]] || { echo "::error::Saved-plan hash verification failed."; exit 1; }
 
-      - name: Apply exact reviewed plan
+      - name: Terraform init
         run: |
           set -euo pipefail
           terraform init -input=false -reconfigure \
             -backend-config="storage_account_name=${{ steps.backend.outputs.name }}" \
             -backend-config="subscription_id=${ARM_SUBSCRIPTION_ID}" \
             -backend-config="tenant_id=${ARM_TENANT_ID}"
+
+      # CR-08 (2026-08-13 review): the early freshness check above runs before
+      # the environment approval wait and the plan download, so main can move
+      # between it and the apply. Re-checking here, with nothing but the apply
+      # left in the job, shrinks that window to the gap between two adjacent
+      # steps. The early check stays for fast feedback; this one is the
+      # enforcement.
+      - name: Re-verify main has not moved
+        working-directory: .
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          [[ "$(git rev-parse origin/main)" == "$SOURCE_COMMIT" ]] || {
+            echo "::error::main moved after planning. Generate and approve a new saved plan."
+            exit 1
+          }
+
+      - name: Apply exact reviewed plan
+        run: |
+          set -euo pipefail
           terraform apply -input=false tfplan
 
   # Identical trust chain for the public-DNS stack. It writes into a zone that
@@ -400,6 +422,28 @@ jobs:
           computed_sha256="$(sha256sum cloudflare.tfplan | awk '{print $1}')"
           [[ "$computed_sha256" == "$APPROVED_SHA256" ]] || { echo "::error::Saved-plan hash verification failed."; exit 1; }
 
+      - name: Terraform init
+        run: |
+          set -euo pipefail
+          terraform init -input=false -reconfigure \
+            -backend-config="storage_account_name=${{ steps.backend.outputs.name }}" \
+            -backend-config="subscription_id=${ARM_SUBSCRIPTION_ID}" \
+            -backend-config="tenant_id=${ARM_TENANT_ID}"
+
+      # CR-08: same adjacency argument as the lab job — the re-check is the
+      # enforcement, the early check is the fast feedback.
+      - name: Re-verify main has not moved
+        working-directory: .
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          [[ "$(git rev-parse origin/main)" == "$SOURCE_COMMIT" ]] || {
+            echo "::error::main moved after planning. Generate and approve a new saved plan."
+            exit 1
+          }
+
       - name: Apply exact reviewed Cloudflare plan
         env:
           # Environment-scoped edit token (DOC-B06): reachable only from this
@@ -407,8 +451,4 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
-          terraform init -input=false -reconfigure \
-            -backend-config="storage_account_name=${{ steps.backend.outputs.name }}" \
-            -backend-config="subscription_id=${ARM_SUBSCRIPTION_ID}" \
-            -backend-config="tenant_id=${ARM_TENANT_ID}"
           terraform apply -input=false cloudflare.tfplan
