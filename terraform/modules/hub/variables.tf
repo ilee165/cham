@@ -32,6 +32,15 @@ variable "disk_controller_type" {
 
 variable "resource_group_name" { type = string }
 
+# The WR-06 CIDR checks below repeat one arithmetic idiom: two CIDRs overlap
+# iff, at the coarser of the two prefix lengths, both collapse to the same
+# network. The repetition across hub, dns-resolver, and the lab root is
+# language-forced and accepted deliberately (2026-08-15 standards review):
+# `validation` blocks cannot reference locals or other modules, and moving
+# the checks off the variable boundary would strip fail-closed input
+# validation from standalone module use. The canonical, fully commented form
+# lives in envs/lab/main.tf (locals.routed_network_overlaps) — change the
+# rule there first, then mirror it here.
 variable "address_space" {
   description = "Hub VNet CIDR. NEW-WR-02: feeds local.internal_cidrs, so it renders into the public-IP hub's BIND ACLs, NSG allow rules, and NAT sources — validated like onprem_address_space."
   type        = string
