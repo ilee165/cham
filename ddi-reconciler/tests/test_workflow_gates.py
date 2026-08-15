@@ -433,14 +433,18 @@ def test_every_executable_input_is_pinned_by_hash():
 def test_every_pin_names_the_version_it_tracks():
     # Raw-text scan, not YAML: the version lives in a comment, and comments do
     # not survive yaml.safe_load. A bare hash is unreviewable — nobody can say
-    # what a pin drifted FROM when dependabot proposes moving it.
+    # what a pin drifted FROM when dependabot proposes moving it. The comment
+    # must carry a version-shaped token (PR #22 review, IN-03): accepting any
+    # comment at all let a bumped SHA keep a stale `# pinned`-style label.
     for path in _workflow_files():
         for lineno, line in enumerate(
                 path.read_text(encoding="utf-8").splitlines(), start=1):
             if "uses:" in line.split("#")[0] and "@" in line:
-                assert "#" in line, (
+                comment = line.partition("#")[2]
+                assert re.search(r"\bv?\d+\.\d+(\.\d+)?\b", comment), (
                     f"{path.name}:{lineno} pins a hash without a comment "
-                    "naming the version it tracks"
+                    "carrying the version it tracks (expected something "
+                    "shaped like v4.4.0 after the #)"
                 )
 
 
