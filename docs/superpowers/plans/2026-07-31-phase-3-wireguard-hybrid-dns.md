@@ -423,6 +423,12 @@ report, stop and return for review.
 Set the absolute deadline before the first start, launch the reviewed watchdog
 as a separate hidden process, and prove it remains running:
 
+> **Superseded (2026-08-15, PR #28):** the watchdog now REQUIRES
+> `-SubscriptionId` and must be launched with `-NonInteractive` — this frozen
+> argv, run verbatim, wedges at an invisible mandatory-parameter prompt while
+> the `HasExited` check below reports it armed. Use the canonical arming
+> snippet in `docs/runbook.md` ("Minimum VM sequence", step 1).
+
 ```powershell
 $deadlineUtc = (Get-Date).ToUniversalTime().AddMinutes(60)
 $watchdogArgs = @(

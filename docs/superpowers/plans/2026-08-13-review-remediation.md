@@ -192,26 +192,26 @@ Branch: `fix/review-workflows`. Verification: actionlint + `test_workflow_gates.
 
 Branch: `fix/review-watchdog`. Session tooling — not in any unattended path.
 
-- [ ] **D1 (CR-05): subscription pinning.** Mandatory `SubscriptionId` param,
+- [x] **D1 (CR-05): subscription pinning.** Mandatory `SubscriptionId` param,
   GUID-validated via `[ValidatePattern]`. Every az invocation (`get-access-token`
   probe, `vm deallocate`, `vm get-instance-view`) gains
   `--subscription $SubscriptionId`. Arm-time probe verifies the subscription is
   reachable. Subscription appears in every audit log line.
-- [ ] **D2 (CR-06): reissue-capable state machine.** Merge the request and
+- [x] **D2 (CR-06): reissue-capable state machine.** Merge the request and
   verify loops into one per-VM state machine: `pending-request` →
   `pending-verify` → done. A VM in `pending-verify` whose instance view still
   shows a running state N cycles after acceptance (~3 min) drops back to
   `pending-request` and the deallocate is reissued — all inside the existing
   30-minute budget, which keeps its loud terminal throw. `-DryRun` behavior
   unchanged.
-- [ ] **D3: argument-construction test.** Extend `-DryRun` to also print the
+- [x] **D3: argument-construction test.** Extend `-DryRun` to also print the
   fully-formed az argument vectors it WOULD run. New
   `tests/test_watchdog_args.py` (reconciler test tree, where the workflow-gate
   tests already live): invoke `pwsh -File ... -DryRun`, assert every printed az
   command carries `--subscription` and the pinned resource group;
   `pytest.mark.skipif` when `pwsh` is absent, with the skip reason naming what
   is lost — ubuntu CI runners ship pwsh, so CI always runs it.
-- [ ] **D4: close out.** Dry-run + real arm-time smoke against a dead deadline
+- [x] **D4: close out.** Dry-run + real arm-time smoke against a dead deadline
   (probe fails fast without a lab — expected; the point is argument shape).
   PR through the gate.
 
