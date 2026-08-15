@@ -212,6 +212,27 @@ class TestReissueStateMachine:
         assert re.search(r"throw 'Watchdog retry budget exhausted", self.TEXT)
 
 
+def test_runbook_arming_snippet_matches_the_tested_invocation_shape():
+    # WD-01 (PR #28 review): the watchdog is launched hidden via Start-Process
+    # and "proved" armed by a HasExited check two seconds later. Without
+    # -NonInteractive, an omitted mandatory parameter (such as the new
+    # -SubscriptionId) leaves pwsh WAITING at an invisible prompt — not
+    # exited — so the arm-proof reports an armed watchdog that will never
+    # deallocate anything. The runbook must therefore carry a concrete arming
+    # argv using the same invocation shape this test file exercises:
+    # -NonInteractive so a contract drift fails loudly at arm time.
+    runbook = (REPO_ROOT / "docs" / "runbook.md").read_text(encoding="utf-8")
+    blocks = [
+        block
+        for block in re.findall(r"```powershell\n(.*?)```", runbook, re.DOTALL)
+        if "phase3-vm-watchdog.ps1" in block
+    ]
+    assert blocks, "runbook has no concrete watchdog arming snippet"
+    for block in blocks:
+        assert "'-NonInteractive'" in block, block
+        assert "'-SubscriptionId'" in block, block
+
+
 def test_subscription_guid_shape_is_validated_in_the_script():
     # Structure pin, pwsh-independent: the parameter must carry a GUID
     # ValidatePattern, not merely non-emptiness — a subscription NAME would

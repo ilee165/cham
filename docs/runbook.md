@@ -149,7 +149,28 @@ Minimum VM sequence (unconditional):
 1. Arm the deallocation-only watchdog (`scripts/phase3-vm-watchdog.ps1`)
    with an absolute UTC deadline of at most 60 minutes and the lab
    subscription GUID (`-SubscriptionId`; mandatory — every az call it issues
-   is pinned to it), and prove it is running before any start.
+   is pinned to it), and prove it is running before any start. This is the
+   canonical arming invocation (it supersedes the argv frozen in the
+   2026-07-31 Phase 3 plan): `-NonInteractive` is load-bearing — the
+   watchdog runs in a hidden window, and without it a missing mandatory
+   parameter leaves pwsh waiting at an invisible prompt that the
+   `HasExited` arm-proof below cannot distinguish from an armed watchdog.
+
+   ```powershell
+   $deadlineUtc = (Get-Date).ToUniversalTime().AddMinutes(60)
+   $watchdogArgs = @(
+     '-NoProfile', '-NonInteractive',
+     '-File', (Resolve-Path 'scripts/phase3-vm-watchdog.ps1'),
+     '-DeadlineUtc', $deadlineUtc.ToString('o'),
+     '-ResourceGroup', 'rg-cham-lab',
+     '-SubscriptionId', $labSubscriptionId,  # GUID, never a name; from the approved session parameters
+     '-VmNames', 'vm-hub-ddi,vm-test-app,vm-test-mgmt'
+   )
+   $watchdog = Start-Process -FilePath (Get-Command pwsh).Source `
+     -ArgumentList $watchdogArgs -WindowStyle Hidden -PassThru
+   Start-Sleep -Seconds 2
+   if ($watchdog.HasExited) { throw 'Phase 3 watchdog failed to arm' }
+   ```
 2. Start `vm-hub-ddi` only; wait for `VM running`, SSH, and cloud-init.
 3. Run every hub tunnel/DNS gate; only then start `vm-test-app`.
 4. Never start `vm-test-mgmt`.
