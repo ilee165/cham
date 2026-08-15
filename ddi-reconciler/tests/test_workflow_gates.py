@@ -280,8 +280,14 @@ def _all_jobs():
 
 
 def _is_freshness_recheck(step):
+    # `git fetch` is part of the property, not an implementation detail: a
+    # re-verify step that only compares `origin/main` reads the stale ref from
+    # checkout time, which by construction still equals source_commit — the
+    # check would pass forever and enforce nothing (PR #22 review, WR-01).
     code = _step_code(step)
-    return "rev-parse origin/main" in code and "SOURCE_COMMIT" in code
+    return ("git fetch" in code
+            and "rev-parse origin/main" in code
+            and "SOURCE_COMMIT" in code)
 
 
 def _terraform_apply_jobs():
