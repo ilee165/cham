@@ -1,0 +1,23 @@
+# Release automation: release-please maintains a rolling release PR that
+# accumulates conventional commits landing on main. Merging that PR cuts the
+# tag, the GitHub release, and the changelog in one step. Versioning is
+# repo-wide (single manifest entry at "."); ddi-reconciler's pyproject.toml
+# version is kept in lockstep via the extra-files updater.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
