@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ddi-reconciler"
-version = "0.5.0" # x-release-please-version
+version = "0.6.0" # x-release-please-version
 description = "Reconciler v2 — converges Azure Private DNS and Cloudflare toward SpatiumDDI truth"
 requires-python = ">=3.11"
 dependencies = [
